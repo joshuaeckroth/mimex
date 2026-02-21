@@ -350,6 +350,14 @@ program
   .option("--planner-command <command>", "shell command for LLM-based planner (reads JSON stdin, writes JSON stdout)")
   .option("--planner-timeout-ms <ms>", "LLM planner timeout in ms", "60000")
   .action(async (options: ImportNotionOptions) => {
+    const outputMode = resolveOutputMode(getGlobals());
+    const emitImportStatus =
+      outputMode === "human"
+        ? (message: string): void => {
+            process.stderr.write(`[notion-import] ${message}\n`);
+          }
+        : undefined;
+
     await withCore(async (core) => {
       const strategy = options.strategy === "llm" ? "llm" : "heuristic";
       const summary = await importFromNotionMcp(core, {
@@ -360,7 +368,8 @@ program
         mcpArgs: options.mcpArg && options.mcpArg.length > 0 ? options.mcpArg : ["-y", "mcp-remote", "https://mcp.notion.com/mcp"],
         strategy,
         plannerCommand: options.plannerCommand,
-        plannerTimeoutMs: parseLimit(options.plannerTimeoutMs, 60000)
+        plannerTimeoutMs: parseLimit(options.plannerTimeoutMs, 60000),
+        onStatus: emitImportStatus
       });
 
       const humanLines = [
