@@ -1,33 +1,156 @@
 #!/usr/bin/env node
-import React, { useEffect, useMemo, useState } from "react";
-import { Box, render, Text, useApp, useInput, useStdin } from "ink";
-import TextInput from "ink-text-input";
 import path from "node:path";
 import os from "node:os";
+import { appendFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { MimexCore } from "@mimex/core";
+import blessed from "neo-blessed";
+import { extractHardLinks, MimexCore } from "@mimex/core";
 import type { FollowLinkResult, HardLink, NoteMeta, NoteWithBodies, SoftLinkTarget } from "@mimex/shared-types";
 
 type InputMode = "none" | "search" | "create" | "body" | "follow";
+type FocusPane = "notes" | "bodies";
+type ThemeName = "dark" | "light";
+
 interface CompletionCycle {
   seed: string;
   matches: string[];
   index: number;
 }
 
-const defaultWorkspace = process.env.MIMEX_WORKSPACE_PATH ?? path.resolve(process.cwd(), "data/workspaces/local");
+interface NoteDetailsState {
+  openedNote: NoteWithBodies | null;
+  activeBodyIndex: number;
+  hardLinks: HardLink[];
+  softLinks: SoftLinkTarget[];
+}
 
-function clip(text: string, max = 70): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (compact.length <= max) {
-    return compact;
+interface ResolvedNoteDetails {
+  note: NoteWithBodies;
+  hardLinks: HardLink[];
+  softLinks: SoftLinkTarget[];
+}
+
+interface BodyRender {
+  lines: string[];
+  bodyStarts: number[];
+}
+
+interface TuiState {
+  theme: ThemeName;
+  includeArchived: boolean;
+  notes: NoteMeta[];
+  selectedIndex: number;
+  details: NoteDetailsState;
+  mode: InputMode;
+  focusPane: FocusPane;
+  status: string;
+  inputValue: string;
+  completionCycle: CompletionCycle | null;
+  bodyScrollOffset: number;
+}
+
+interface ThemePalette {
+  headerBg: string;
+  headerFg: string;
+  footerBg: string;
+  footerFg: string;
+  notesBg: string;
+  bodyBg: string;
+  notesItemFg: string;
+  bodyItemFg: string;
+  notesSelectedFg: string;
+  notesSelectedBg: string;
+  bodySelectedFg: string;
+  bodySelectedBg: string;
+  borderFocused: string;
+  borderBlurred: string;
+}
+
+const defaultWorkspace = process.env.MIMEX_WORKSPACE_PATH ?? path.resolve(process.cwd(), "data/workspaces/local");
+const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
+const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
+const THEME_ENV = process.env.MIMEX_TUI_THEME;
+const KEY_HINTS =
+  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, n new, b body, / search, f follow, a archive, r restore, x archived, t theme, s refresh, q quit";
+
+const THEMES: Record<ThemeName, ThemePalette> = {
+  dark: {
+    headerBg: "black",
+    headerFg: "white",
+    footerBg: "black",
+    footerFg: "white",
+    notesBg: "black",
+    bodyBg: "black",
+    notesItemFg: "white",
+    bodyItemFg: "white",
+    notesSelectedFg: "black",
+    notesSelectedBg: "white",
+    bodySelectedFg: "black",
+    bodySelectedBg: "white",
+    borderFocused: "white",
+    borderBlurred: "gray"
+  },
+  light: {
+    headerBg: "white",
+    headerFg: "black",
+    footerBg: "white",
+    footerFg: "black",
+    notesBg: "white",
+    bodyBg: "white",
+    notesItemFg: "black",
+    bodyItemFg: "gray",
+    notesSelectedFg: "white",
+    notesSelectedBg: "black",
+    bodySelectedFg: "white",
+    bodySelectedBg: "black",
+    borderFocused: "black",
+    borderBlurred: "gray"
   }
-  return `${compact.slice(0, max - 3)}...`;
+};
+
+function resolveInitialTheme(raw: string | undefined): ThemeName {
+  if (!raw) {
+    return "dark";
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "light") {
+    return "light";
+  }
+
+  return "dark";
+}
+
+function debugLog(message: string): void {
+  if (!DEBUG) {
+    return;
+  }
+
+  try {
+    appendFileSync(DEBUG_FILE, `${new Date().toISOString()} ${message}\n`, "utf8");
+  } catch {
+    // ignore debug log write failures
+  }
 }
 
 function noteStatus(note: NoteMeta): string {
   return note.archivedAt ? "archived" : "active";
+}
+
+function promptForMode(mode: InputMode): string {
+  switch (mode) {
+    case "search":
+      return "Search query";
+    case "create":
+      return "New note title";
+    case "body":
+      return "Body markdown";
+    case "follow":
+      return "Follow target";
+    default:
+      return "";
+  }
 }
 
 function uniqueSorted(values: string[]): string[] {
@@ -51,116 +174,394 @@ function filterCompletionCandidates(values: string[], seed: string): string[] {
   return source.filter((value) => value.toLowerCase().includes(query));
 }
 
-function listWindow(notes: NoteMeta[], selectedIndex: number, size = 14): Array<{ note: NoteMeta; selected: boolean }> {
-  if (notes.length === 0) {
-    return [];
+function truncateForWidth(input: string, width: number): string {
+  if (width <= 0) {
+    return "";
   }
 
-  const start = Math.max(0, Math.min(selectedIndex - Math.floor(size / 2), Math.max(0, notes.length - size)));
-  return notes.slice(start, start + size).map((note, idx) => ({
-    note,
-    selected: start + idx === selectedIndex
-  }));
-}
-
-function promptForMode(mode: InputMode): string {
-  switch (mode) {
-    case "search":
-      return "Search query";
-    case "create":
-      return "New note title";
-    case "body":
-      return "Body markdown";
-    case "follow":
-      return "Follow target";
-    default:
-      return "";
+  if (input.length <= width) {
+    return input;
   }
+
+  if (width <= 1) {
+    return input.slice(0, width);
+  }
+
+  return `${input.slice(0, width - 1)}…`;
 }
 
-function shellQuote(input: string): string {
-  return `'${input.replace(/'/g, `'\"'\"'`)}'`;
+function wrapToWidth(input: string, width: number): string[] {
+  const safeWidth = Math.max(8, width);
+  const normalized = input.replace(/\t/g, "    ");
+  if (normalized.length <= safeWidth) {
+    return [normalized];
+  }
+
+  const out: string[] = [];
+  let rest = normalized;
+
+  while (rest.length > safeWidth) {
+    let cut = rest.lastIndexOf(" ", safeWidth);
+    if (cut < Math.floor(safeWidth * 0.5)) {
+      cut = safeWidth;
+    }
+
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+
+  out.push(rest);
+  return out;
 }
 
-function App(): React.ReactElement {
-  const { exit } = useApp();
-  const { setRawMode } = useStdin();
-  const [workspace] = useState(defaultWorkspace);
-  const [includeArchived, setIncludeArchived] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [notes, setNotes] = useState<NoteMeta[]>([]);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [openedNote, setOpenedNote] = useState<NoteWithBodies | null>(null);
-  const [activeBodyIndex, setActiveBodyIndex] = useState(0);
-  const [hardLinks, setHardLinks] = useState<HardLink[]>([]);
-  const [softLinks, setSoftLinks] = useState<SoftLinkTarget[]>([]);
-  const [status, setStatus] = useState("Starting...");
-  const [mode, setMode] = useState<InputMode>("none");
-  const [inputValue, setInputValue] = useState("");
-  const [completionCycle, setCompletionCycle] = useState<CompletionCycle | null>(null);
+function bodyIndexForLine(bodyStarts: number[], line: number): number {
+  if (bodyStarts.length === 0) {
+    return 0;
+  }
 
-  const core = useMemo(() => new MimexCore(workspace), [workspace]);
-  const selected = notes[selectedIndex] ?? null;
-  const titleAndAliasCompletions = useMemo(
-    () => uniqueSorted(notes.flatMap((note) => [note.title, ...note.aliases])),
-    [notes]
-  );
-  const noteReferenceCompletions = useMemo(
-    () => uniqueSorted(notes.flatMap((note) => [note.id, note.title, ...note.aliases])),
-    [notes]
-  );
-  const hardLinkCompletions = useMemo(() => uniqueSorted(hardLinks.map((link) => link.raw)), [hardLinks]);
+  let selected = 0;
+  for (const [index, start] of bodyStarts.entries()) {
+    if (start <= line) {
+      selected = index;
+      continue;
+    }
+    break;
+  }
 
-  const loadDetails = async (noteRef: string): Promise<void> => {
-    const note = await core.getNote(noteRef);
-    const links = await core.parseHardLinks(noteRef);
-    const soft = await core.getTopSoftLinks(noteRef, 8);
-    setOpenedNote(note);
-    setActiveBodyIndex((idx) => {
-      if (note.bodies.length === 0) {
-        return 0;
+  return selected;
+}
+
+function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): BodyRender {
+  const { openedNote, activeBodyIndex, hardLinks, softLinks } = details;
+
+  if (!openedNote) {
+    return {
+      lines: ["Select a note.", "", "Hard links: 0", "Top soft: (none)"],
+      bodyStarts: []
+    };
+  }
+
+  const lines: string[] = [];
+  const bodyStarts: number[] = [];
+
+  lines.push(openedNote.note.title);
+  lines.push(`Status: ${noteStatus(openedNote.note)} | Bodies: ${openedNote.bodies.length}`);
+  lines.push("");
+
+  if (openedNote.bodies.length === 0) {
+    lines.push("(no bodies)");
+  }
+
+  for (const [index, body] of openedNote.bodies.entries()) {
+    bodyStarts.push(lines.length);
+    const prefix = index === activeBodyIndex ? ">" : " ";
+    lines.push(`${prefix} [${index + 1}/${openedNote.bodies.length}] ${body.label} (${body.id}) updated ${body.updatedAt}`);
+
+    for (const rawLine of body.markdown.replace(/\r\n/g, "\n").split("\n")) {
+      const wrapped = wrapToWidth(rawLine, Math.max(8, bodyTextWidth - 2));
+      for (const chunk of wrapped) {
+        lines.push(`  ${chunk || " "}`);
       }
-      return Math.max(0, Math.min(idx, note.bodies.length - 1));
-    });
-    setHardLinks(links);
-    setSoftLinks(soft);
+    }
+
+    if (index < openedNote.bodies.length - 1) {
+      lines.push("----------------------------------------------------------------");
+    }
+  }
+
+  lines.push("");
+
+  const hardLinksSummary =
+    hardLinks.length === 0 ? "Hard links: 0" : `Hard links (${hardLinks.length}): ${hardLinks.slice(0, 8).map((link) => link.raw).join(", ")}`;
+  for (const wrapped of wrapToWidth(hardLinksSummary, bodyTextWidth)) {
+    lines.push(wrapped);
+  }
+
+  const softSummary =
+    softLinks.length === 0
+      ? "Top soft: (none)"
+      : `Top soft: ${softLinks
+          .slice(0, 8)
+          .map((link) => `${link.title} (${link.weight})`)
+          .join(", ")}`;
+  for (const wrapped of wrapToWidth(softSummary, bodyTextWidth)) {
+    lines.push(wrapped);
+  }
+
+  return { lines, bodyStarts };
+}
+
+function main(): void {
+  const core = new MimexCore(defaultWorkspace);
+  const detailsCache = new Map<string, ResolvedNoteDetails>();
+
+  const state: TuiState = {
+    theme: resolveInitialTheme(THEME_ENV),
+    includeArchived: false,
+    notes: [],
+    selectedIndex: 0,
+    details: {
+      openedNote: null,
+      activeBodyIndex: 0,
+      hardLinks: [],
+      softLinks: []
+    },
+    mode: "none",
+    focusPane: "notes",
+    status: "Starting...",
+    inputValue: "",
+    completionCycle: null,
+    bodyScrollOffset: 0
   };
 
-  const refresh = async (preferredId?: string, includeArchivedValue = includeArchived): Promise<void> => {
-    setLoading(true);
-    try {
-      const previousId = preferredId ?? notes[selectedIndex]?.id;
-      const listed = await core.listNotes({ includeArchived: includeArchivedValue });
-      setNotes(listed);
+  let isBusy = false;
+  let detailLoadToken = 0;
+  let lastBodyRender: BodyRender = { lines: [], bodyStarts: [] };
+  let lastBodyViewport = 1;
 
-      if (listed.length === 0) {
-        setSelectedIndex(0);
-        setOpenedNote(null);
-        setHardLinks([]);
-        setSoftLinks([]);
-        setStatus("No notes yet. Press n to create one.");
+  const screen = blessed.screen({
+    smartCSR: true,
+    fullUnicode: true,
+    dockBorders: true,
+    title: "mimex"
+  });
+
+  const header = blessed.box({
+    top: 0,
+    left: 0,
+    height: 1,
+    width: "100%",
+    tags: false,
+    style: {
+      bg: THEMES[state.theme].headerBg,
+      fg: THEMES[state.theme].headerFg
+    }
+  });
+
+  const notesList = blessed.list({
+    top: 1,
+    left: 0,
+    width: 48,
+    height: 20,
+    border: "line",
+    label: " Notes ",
+    mouse: true,
+    keys: false,
+    vi: false,
+    tags: false,
+    scrollable: true,
+    alwaysScroll: true,
+    style: {
+      bg: THEMES[state.theme].notesBg,
+      border: { fg: THEMES[state.theme].borderBlurred },
+      selected: { fg: THEMES[state.theme].notesSelectedFg, bg: THEMES[state.theme].notesSelectedBg },
+      item: { fg: THEMES[state.theme].notesItemFg, bg: THEMES[state.theme].notesBg }
+    },
+    scrollbar: {
+      ch: " "
+    }
+  });
+
+  const bodyList = blessed.list({
+    top: 1,
+    left: 48,
+    width: 72,
+    height: 20,
+    border: "line",
+    label: " Bodies ",
+    mouse: true,
+    keys: false,
+    vi: false,
+    tags: false,
+    scrollable: true,
+    alwaysScroll: true,
+    style: {
+      bg: THEMES[state.theme].bodyBg,
+      border: { fg: THEMES[state.theme].borderBlurred },
+      selected: { fg: THEMES[state.theme].bodySelectedFg, bg: THEMES[state.theme].bodySelectedBg },
+      item: { fg: THEMES[state.theme].bodyItemFg, bg: THEMES[state.theme].bodyBg }
+    },
+    scrollbar: {
+      ch: " "
+    }
+  });
+
+  const footer = blessed.box({
+    bottom: 0,
+    left: 0,
+    height: 2,
+    width: "100%",
+    tags: false,
+    style: {
+      bg: THEMES[state.theme].footerBg,
+      fg: THEMES[state.theme].footerFg
+    }
+  });
+
+  screen.append(header);
+  screen.append(notesList);
+  screen.append(bodyList);
+  screen.append(footer);
+
+  function getTerminalRows(): number {
+    const fromScreen = typeof screen.height === "number" ? screen.height : Number.parseInt(String(screen.height), 10);
+    if (Number.isFinite(fromScreen) && fromScreen > 0) {
+      return fromScreen;
+    }
+
+    return process.stdout.rows ?? 24;
+  }
+
+  function getTerminalCols(): number {
+    const fromScreen = typeof screen.width === "number" ? screen.width : Number.parseInt(String(screen.width), 10);
+    if (Number.isFinite(fromScreen) && fromScreen > 0) {
+      return fromScreen;
+    }
+
+    return process.stdout.columns ?? 120;
+  }
+
+  function getSelectedNote(): NoteMeta | null {
+    return state.notes[state.selectedIndex] ?? null;
+  }
+
+  function setStatus(message: string): void {
+    state.status = message;
+  }
+
+  function applyResolvedDetails(resolved: ResolvedNoteDetails): void {
+    const previousNoteId = state.details.openedNote?.note.id;
+    const noteChanged = previousNoteId !== resolved.note.note.id;
+
+    const nextBodyIndex = resolved.note.bodies.length === 0 ? 0 : Math.max(0, Math.min(state.details.activeBodyIndex, resolved.note.bodies.length - 1));
+
+    state.details = {
+      openedNote: resolved.note,
+      activeBodyIndex: nextBodyIndex,
+      hardLinks: resolved.hardLinks,
+      softLinks: resolved.softLinks
+    };
+
+    if (noteChanged) {
+      state.bodyScrollOffset = 0;
+    }
+  }
+
+  async function fetchResolvedDetails(noteRef: string, force = false): Promise<ResolvedNoteDetails> {
+    if (!force) {
+      const cached = detailsCache.get(noteRef);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const [note, soft] = await Promise.all([core.getNote(noteRef), core.getTopSoftLinks(noteRef, 8)]);
+    const linksByNormalized = new Map<string, HardLink>();
+
+    for (const body of note.bodies) {
+      for (const link of extractHardLinks(body.markdown)) {
+        linksByNormalized.set(link.normalized, link);
+      }
+    }
+
+    const resolved: ResolvedNoteDetails = {
+      note,
+      hardLinks: [...linksByNormalized.values()],
+      softLinks: soft
+    };
+
+    detailsCache.set(note.note.id, resolved);
+    return resolved;
+  }
+
+  function prefetchDetails(noteIds: string[]): void {
+    for (const noteId of noteIds) {
+      if (detailsCache.has(noteId)) {
+        continue;
+      }
+
+      void (async () => {
+        try {
+          await fetchResolvedDetails(noteId, false);
+        } catch {
+          // ignore prefetch failures
+        }
+      })();
+    }
+  }
+
+  async function loadDetails(noteRef: string, token: number, force = false): Promise<void> {
+    try {
+      const resolved = await fetchResolvedDetails(noteRef, force);
+      if (token !== detailLoadToken) {
         return;
       }
 
-      let nextIndex = 0;
-      if (previousId) {
-        const found = listed.findIndex((note) => note.id === previousId);
-        if (found >= 0) {
-          nextIndex = found;
-        }
+      applyResolvedDetails(resolved);
+      renderUI();
+    } catch (error) {
+      if (token !== detailLoadToken) {
+        return;
       }
 
-      setSelectedIndex(nextIndex);
-      await loadDetails(listed[nextIndex].id);
-      setStatus(`Loaded ${listed.length} notes`);
-    } catch (error) {
       setStatus(`Error: ${(error as Error).message}`);
-    } finally {
-      setLoading(false);
+      renderUI();
     }
-  };
+  }
 
-  const followAndShow = async (sourceId: string, target: string): Promise<void> => {
+  async function refresh(preferredId?: string, includeArchivedValue = state.includeArchived): Promise<void> {
+    setStatus("Refreshing notes...");
+    renderUI();
+
+    const previousId = preferredId ?? getSelectedNote()?.id;
+    const listed = await core.listNotes({ includeArchived: includeArchivedValue });
+
+    state.includeArchived = includeArchivedValue;
+    state.notes = listed;
+    detailsCache.clear();
+
+    if (listed.length === 0) {
+      state.selectedIndex = 0;
+      state.details = {
+        openedNote: null,
+        activeBodyIndex: 0,
+        hardLinks: [],
+        softLinks: []
+      };
+      state.bodyScrollOffset = 0;
+      setStatus("No notes yet. Press n to create one.");
+      renderUI();
+      return;
+    }
+
+    let nextIndex = 0;
+    if (previousId) {
+      const found = listed.findIndex((note) => note.id === previousId);
+      if (found >= 0) {
+        nextIndex = found;
+      }
+    }
+
+    state.selectedIndex = nextIndex;
+
+    const selectedNote = listed[nextIndex];
+    if (selectedNote) {
+      const token = detailLoadToken + 1;
+      detailLoadToken = token;
+      await loadDetails(selectedNote.id, token, true);
+
+      prefetchDetails(
+        listed
+          .map((note) => note.id)
+          .filter((id) => id !== selectedNote.id)
+      );
+    }
+
+    setStatus(`Loaded ${listed.length} notes`);
+    renderUI();
+  }
+
+  async function followAndShow(sourceId: string, target: string): Promise<void> {
     const result: FollowLinkResult = await core.followLink(sourceId, target);
     if (result.targetNoteId) {
       await refresh(result.targetNoteId);
@@ -169,28 +570,30 @@ function App(): React.ReactElement {
     }
 
     setStatus("No target found");
-  };
+  }
 
-  const editCurrentBodyInEditor = async (): Promise<void> => {
+  async function editCurrentBodyInEditor(): Promise<void> {
+    const openedNote = state.details.openedNote;
     if (!openedNote) {
       setStatus("No note selected");
       return;
     }
+
     if (openedNote.note.archivedAt) {
       setStatus("Cannot edit archived note");
       return;
     }
 
-    let body = openedNote.bodies[activeBodyIndex];
+    let body = openedNote.bodies[state.details.activeBodyIndex];
     if (!body) {
       const created = await core.addBody({
         noteRef: openedNote.note.id,
         label: "main",
         markdown: ""
       });
+      detailsCache.delete(openedNote.note.id);
       body = created.bodies[0];
-      setOpenedNote(created);
-      setActiveBodyIndex(0);
+      await refresh(openedNote.note.id);
     }
 
     if (!body) {
@@ -198,20 +601,31 @@ function App(): React.ReactElement {
       return;
     }
 
-    const editor = process.env.EDITOR ?? "vi";
+    const editor = process.env.EDITOR ?? (process.platform === "win32" ? "notepad" : "vi");
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mimex-edit-"));
     const tmpPath = path.join(tmpDir, `${openedNote.note.id}-${body.id}.md`);
 
     try {
       await writeFile(tmpPath, body.markdown, "utf8");
       setStatus(`Opening editor (${editor})...`);
-      setRawMode(false);
-      spawnSync("sh", ["-lc", `${editor} ${shellQuote(tmpPath)}`], { stdio: "inherit" });
-      setRawMode(true);
+      renderUI();
+
+      const screenWithAlt = screen as blessed.Widgets.Screen & { leave?: () => void; enter?: () => void };
+      screenWithAlt.leave?.();
+      const child = spawnSync(editor, [tmpPath], {
+        stdio: "inherit",
+        shell: true
+      });
+      screenWithAlt.enter?.();
+
+      if (child.error) {
+        throw child.error;
+      }
 
       const edited = await readFile(tmpPath, "utf8");
       if (edited === body.markdown) {
         setStatus("No changes saved");
+        renderUI();
         return;
       }
 
@@ -220,365 +634,621 @@ function App(): React.ReactElement {
         bodyId: body.id,
         markdown: edited
       });
+
+      detailsCache.delete(openedNote.note.id);
       await refresh(openedNote.note.id);
       setStatus(`Saved body ${body.label}`);
+      renderUI();
     } finally {
-      setRawMode(true);
       await rm(tmpDir, { recursive: true, force: true });
     }
-  };
+  }
 
-  useEffect(() => {
-    void (async () => {
-      await core.init();
-      await refresh();
-    })();
-  }, []);
+  function completionCandidatesForMode(mode: InputMode): string[] {
+    const titleAndAlias = uniqueSorted(state.notes.flatMap((note) => [note.title, ...note.aliases]));
+    const noteRefs = uniqueSorted(state.notes.flatMap((note) => [note.id, note.title, ...note.aliases]));
+    const hardLinks = uniqueSorted(state.details.hardLinks.map((link) => link.raw));
 
-  useEffect(() => {
-    if (!selected) {
-      return;
+    if (mode === "search") {
+      return [...hardLinks, ...titleAndAlias];
     }
 
-    void (async () => {
-      try {
-        await loadDetails(selected.id);
-      } catch {
-        // keep current state if note was changed between renders
-      }
-    })();
-  }, [selectedIndex, notes]);
-
-  const submitInput = async (): Promise<void> => {
-    const value = inputValue.trim();
-    const currentMode = mode;
-    setInputValue("");
-    setMode("none");
-    setCompletionCycle(null);
-
-    if (!value) {
-      setStatus("Cancelled empty input");
-      return;
+    if (mode === "follow") {
+      return [...hardLinks, ...noteRefs];
     }
 
-    try {
-      if (currentMode === "search") {
-        const results = await core.searchNotes(value, 25, { includeArchived });
-        if (results.length === 0) {
-          setStatus("No matches");
-          return;
-        }
-        await refresh(results[0]?.noteId ?? undefined);
-        setStatus(`Search matched ${results.length} notes`);
-        return;
-      }
-
-      if (currentMode === "create") {
-        const created = await core.createNote({ title: value });
-        await refresh(created.note.id);
-        setStatus(`Created ${created.note.title}`);
-        return;
-      }
-
-      if (currentMode === "body") {
-        if (!selected) {
-          setStatus("No note selected");
-          return;
-        }
-        await core.addBody({ noteRef: selected.id, markdown: value, label: `body-${Date.now()}` });
-        await refresh(selected.id);
-        setStatus("Added body");
-        return;
-      }
-
-      if (currentMode === "follow") {
-        if (!selected) {
-          setStatus("No note selected");
-          return;
-        }
-        await followAndShow(selected.id, value);
-      }
-    } catch (error) {
-      setStatus(`Error: ${(error as Error).message}`);
-    }
-  };
-
-  useEffect(() => {
-    setCompletionCycle(null);
-  }, [mode]);
-
-  const updateInputValue = (value: string): void => {
-    setInputValue(value);
-    setCompletionCycle(null);
-  };
-
-  const completionCandidatesForMode = (inputMode: InputMode): string[] => {
-    if (inputMode === "search") {
-      return [...hardLinkCompletions, ...titleAndAliasCompletions];
-    }
-
-    if (inputMode === "follow") {
-      return [...hardLinkCompletions, ...noteReferenceCompletions];
-    }
-
-    if (inputMode === "create") {
-      return titleAndAliasCompletions;
+    if (mode === "create") {
+      return titleAndAlias;
     }
 
     return [];
-  };
+  }
 
-  const advanceCompletion = (): void => {
-    if (mode === "none") {
+  function advanceCompletion(): void {
+    if (state.mode === "none") {
       return;
     }
 
-    const allowCycle = completionCycle && (inputValue === completionCycle.seed || completionCycle.matches.includes(inputValue));
+    const allowCycle =
+      state.completionCycle &&
+      (state.inputValue === state.completionCycle.seed || state.completionCycle.matches.includes(state.inputValue));
 
     if (!allowCycle) {
-      const matches = filterCompletionCandidates(completionCandidatesForMode(mode), inputValue);
+      const matches = filterCompletionCandidates(completionCandidatesForMode(state.mode), state.inputValue);
       if (matches.length === 0) {
         setStatus("No completion candidates");
         return;
       }
 
-      setInputValue(matches[0] ?? inputValue);
-      setCompletionCycle({
-        seed: inputValue,
+      state.inputValue = matches[0] ?? state.inputValue;
+      state.completionCycle = {
+        seed: state.inputValue,
         matches,
         index: 0
-      });
+      };
       setStatus(`Completion 1/${matches.length}`);
       return;
     }
 
-    const nextIndex = (completionCycle.index + 1) % completionCycle.matches.length;
-    const nextValue = completionCycle.matches[nextIndex] ?? inputValue;
-    setInputValue(nextValue);
-    setCompletionCycle({
-      ...completionCycle,
+    const cycle = state.completionCycle;
+    if (!cycle) {
+      return;
+    }
+
+    const nextIndex = (cycle.index + 1) % cycle.matches.length;
+    const nextValue = cycle.matches[nextIndex] ?? state.inputValue;
+    state.inputValue = nextValue;
+    state.completionCycle = {
+      ...cycle,
       index: nextIndex
-    });
-    setStatus(`Completion ${nextIndex + 1}/${completionCycle.matches.length}`);
-  };
+    };
+    setStatus(`Completion ${nextIndex + 1}/${cycle.matches.length}`);
+  }
 
-  useInput((input, key) => {
-    if (mode !== "none") {
-      if (key.tab || input === "\t") {
-        advanceCompletion();
+  function setBodyScroll(next: number): void {
+    const maxBodyScroll = Math.max(0, lastBodyRender.lines.length - lastBodyViewport);
+    const clamped = Math.max(0, Math.min(maxBodyScroll, next));
+    state.bodyScrollOffset = clamped;
+
+    if ((state.details.openedNote?.bodies.length ?? 0) > 0) {
+      state.details.activeBodyIndex = bodyIndexForLine(lastBodyRender.bodyStarts, clamped);
+    }
+  }
+
+  function scrollBodyBy(delta: number): void {
+    if (!state.details.openedNote || state.details.openedNote.bodies.length === 0) {
+      setStatus("No note bodies to scroll");
+      renderUI();
+      return;
+    }
+
+    setBodyScroll(state.bodyScrollOffset + delta);
+    renderUI();
+  }
+
+  function jumpToBodyIndex(targetIndex: number): void {
+    const openedNote = state.details.openedNote;
+    if (!openedNote || openedNote.bodies.length === 0) {
+      setStatus("No note bodies");
+      renderUI();
+      return;
+    }
+
+    const index = Math.max(0, Math.min(openedNote.bodies.length - 1, targetIndex));
+    state.details.activeBodyIndex = index;
+    state.focusPane = "bodies";
+
+    const startLine = lastBodyRender.bodyStarts[index] ?? 0;
+    setBodyScroll(startLine);
+    renderUI();
+  }
+
+  function moveSelectedNoteBy(delta: number): void {
+    if (state.notes.length === 0) {
+      return;
+    }
+
+    const next = Math.max(0, Math.min(state.notes.length - 1, state.selectedIndex + delta));
+    if (next === state.selectedIndex) {
+      return;
+    }
+
+    state.selectedIndex = next;
+    const nextId = state.notes[next]?.id;
+    if (!nextId) {
+      renderUI();
+      return;
+    }
+
+    const cached = detailsCache.get(nextId);
+    if (cached) {
+      applyResolvedDetails(cached);
+      renderUI();
+      return;
+    }
+
+    const token = detailLoadToken + 1;
+    detailLoadToken = token;
+    setStatus("Loading note...");
+    renderUI();
+    void loadDetails(nextId, token);
+  }
+
+  async function submitInput(): Promise<void> {
+    const value = state.inputValue.trim();
+    const currentMode = state.mode;
+
+    state.mode = "none";
+    state.inputValue = "";
+    state.completionCycle = null;
+
+    if (!value) {
+      setStatus("Cancelled empty input");
+      renderUI();
+      return;
+    }
+
+    if (currentMode === "search") {
+      const results = await core.searchNotes(value, 25, { includeArchived: state.includeArchived });
+      if (results.length === 0) {
+        setStatus("No matches");
+        renderUI();
         return;
       }
 
-      if (key.escape) {
-        setMode("none");
-        setInputValue("");
-        setCompletionCycle(null);
-        setStatus("Input cancelled");
-      }
+      await refresh(results[0]?.noteId);
+      setStatus(`Search matched ${results.length} notes`);
+      renderUI();
       return;
     }
 
-    if (input === "q") {
-      exit();
+    if (currentMode === "create") {
+      const created = await core.createNote({ title: value });
+      await refresh(created.note.id);
+      setStatus(`Created ${created.note.title}`);
+      renderUI();
       return;
     }
 
-    if (input === "k" || key.upArrow) {
-      setSelectedIndex((idx) => Math.max(0, idx - 1));
-      return;
-    }
-
-    if (input === "j" || key.downArrow) {
-      setSelectedIndex((idx) => Math.min(Math.max(0, notes.length - 1), idx + 1));
-      return;
-    }
-
-    if (input === "g") {
-      setSelectedIndex(0);
-      return;
-    }
-
-    if (input === "G") {
-      setSelectedIndex(Math.max(0, notes.length - 1));
-      return;
-    }
-
-    if (input === "s") {
-      void refresh();
-      return;
-    }
-
-    if (input === "/") {
-      setMode("search");
-      setStatus("Search mode");
-      return;
-    }
-
-    if (input === "n") {
-      setMode("create");
-      setStatus("Create note mode");
-      return;
-    }
-
-    if (input === "b") {
+    if (currentMode === "body") {
+      const selected = getSelectedNote();
       if (!selected) {
         setStatus("No note selected");
+        renderUI();
         return;
       }
-      setMode("body");
-      setStatus(`Add body to ${selected.title}`);
+
+      await core.addBody({ noteRef: selected.id, markdown: value, label: `body-${Date.now()}` });
+      detailsCache.delete(selected.id);
+      await refresh(selected.id);
+      setStatus("Added body");
+      renderUI();
       return;
     }
 
-    if (input === "f") {
+    if (currentMode === "follow") {
+      const selected = getSelectedNote();
       if (!selected) {
         setStatus("No note selected");
+        renderUI();
         return;
       }
-      setMode("follow");
-      setStatus(`Follow from ${selected.title}`);
+
+      await followAndShow(selected.id, value);
+      renderUI();
+    }
+  }
+
+  async function runAction(task: () => Promise<void>): Promise<void> {
+    if (isBusy) {
+      setStatus("Busy...");
+      renderUI();
       return;
     }
 
-    if (input === "[") {
-      setActiveBodyIndex((idx) => Math.max(0, idx - 1));
+    isBusy = true;
+    try {
+      await task();
+    } catch (error) {
+      setStatus(`Error: ${(error as Error).message}`);
+      renderUI();
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  function renderUI(): void {
+    const rows = Math.max(12, getTerminalRows());
+    const cols = Math.max(80, getTerminalCols());
+
+    const footerHeight = 2;
+    const contentHeight = Math.max(6, rows - 1 - footerHeight);
+    const notesWidth = Math.max(30, Math.floor(cols * 0.42));
+    const bodyWidth = Math.max(40, cols - notesWidth);
+
+    header.width = cols;
+
+    notesList.top = 1;
+    notesList.left = 0;
+    notesList.width = notesWidth;
+    notesList.height = contentHeight;
+
+    bodyList.top = 1;
+    bodyList.left = notesWidth;
+    bodyList.width = bodyWidth;
+    bodyList.height = contentHeight;
+
+    footer.height = footerHeight;
+    footer.width = cols;
+    const theme = THEMES[state.theme];
+    header.style = { bg: theme.headerBg, fg: theme.headerFg };
+    footer.style = { bg: theme.footerBg, fg: theme.footerFg };
+    notesList.style.bg = theme.notesBg;
+    bodyList.style.bg = theme.bodyBg;
+    notesList.style.fg = theme.notesItemFg;
+    bodyList.style.fg = theme.bodyItemFg;
+    notesList.style.selected = { fg: theme.notesSelectedFg, bg: theme.notesSelectedBg };
+    bodyList.style.selected = { fg: theme.bodySelectedFg, bg: theme.bodySelectedBg };
+    notesList.style.item = { fg: theme.notesItemFg, bg: theme.notesBg };
+    bodyList.style.item = { fg: theme.bodyItemFg, bg: theme.bodyBg };
+
+    const selected = getSelectedNote();
+    header.setContent(
+      truncateForWidth(
+        `mimex TUI  theme=${state.theme}  workspace=${defaultWorkspace}  notes=${state.notes.length}  ${state.includeArchived ? "all" : "active"}  ${isBusy ? "busy" : "ready"}`,
+        cols
+      )
+    );
+
+    notesList.style.border = { fg: state.focusPane === "notes" ? theme.borderFocused : theme.borderBlurred };
+    bodyList.style.border = { fg: state.focusPane === "bodies" ? theme.borderFocused : theme.borderBlurred };
+
+    notesList.setLabel(` Notes${state.focusPane === "notes" ? " (focus)" : ""} `);
+    bodyList.setLabel(` Bodies${state.focusPane === "bodies" ? " (focus)" : ""} `);
+
+    const notesItems =
+      state.notes.length === 0
+        ? ["(no notes)"]
+        : state.notes.map((note) => `${note.title} [${noteStatus(note)}]`);
+
+    notesList.setItems(notesItems);
+
+    if (state.notes.length > 0) {
+      state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.notes.length - 1));
+      notesList.select(state.selectedIndex);
+      notesList.scrollTo(state.selectedIndex);
+    } else {
+      state.selectedIndex = 0;
+      notesList.select(0);
+      notesList.scrollTo(0);
+    }
+
+    const bodyTextWidth = Math.max(20, bodyWidth - 4);
+    const bodyRender = buildBodyRender(state.details, bodyTextWidth);
+    lastBodyRender = bodyRender;
+
+    const bodyViewport = Math.max(1, contentHeight - 2);
+    lastBodyViewport = bodyViewport;
+
+    const maxBodyScroll = Math.max(0, bodyRender.lines.length - bodyViewport);
+    state.bodyScrollOffset = Math.max(0, Math.min(maxBodyScroll, state.bodyScrollOffset));
+
+    bodyList.setItems(bodyRender.lines.length === 0 ? [""] : bodyRender.lines);
+    bodyList.select(state.bodyScrollOffset);
+    bodyList.scrollTo(state.bodyScrollOffset);
+
+    const visibleStart = bodyRender.lines.length === 0 ? 0 : state.bodyScrollOffset + 1;
+    const visibleEnd = Math.min(state.bodyScrollOffset + bodyViewport, bodyRender.lines.length);
+    bodyList.setLabel(
+      ` Bodies${state.focusPane === "bodies" ? " (focus)" : ""} lines ${visibleStart}-${visibleEnd}/${bodyRender.lines.length} `
+    );
+
+    const modeLine =
+      state.mode === "none"
+        ? truncateForWidth(KEY_HINTS, cols)
+        : truncateForWidth(`${promptForMode(state.mode)}: ${state.inputValue}_  (Tab completion, Enter submit, Esc cancel)`, cols);
+
+    const statusLine = truncateForWidth(state.status, cols);
+    footer.setContent(`${statusLine}\n${modeLine}`);
+
+    if (selected) {
+      debugLog(
+        `render selected=${selected.id} focus=${state.focusPane} mode=${state.mode} theme=${state.theme} bodyScroll=${state.bodyScrollOffset} lines=${bodyRender.lines.length}`
+      );
+    }
+
+    screen.render();
+  }
+
+  function enterInputMode(mode: InputMode, statusMessage: string): void {
+    state.mode = mode;
+    state.inputValue = "";
+    state.completionCycle = null;
+    setStatus(statusMessage);
+    renderUI();
+  }
+
+  function handleInputMode(ch: string, key: blessed.Widgets.Events.IKeyEventArg): void {
+    if (key.name === "escape") {
+      state.mode = "none";
+      state.inputValue = "";
+      state.completionCycle = null;
+      setStatus("Input cancelled");
+      renderUI();
       return;
     }
 
-    if (input === "]") {
-      setActiveBodyIndex((idx) => {
-        const max = Math.max(0, (openedNote?.bodies.length ?? 1) - 1);
-        return Math.min(max, idx + 1);
+    if (key.name === "tab") {
+      advanceCompletion();
+      renderUI();
+      return;
+    }
+
+    if (key.name === "enter" || key.name === "return") {
+      void runAction(async () => {
+        await submitInput();
       });
       return;
     }
 
-    if (input === "e") {
-      void editCurrentBodyInEditor();
+    if (key.ctrl && key.name === "u") {
+      state.inputValue = "";
+      state.completionCycle = null;
+      renderUI();
       return;
     }
 
-    if (input === "a") {
+    if (key.name === "backspace" || key.name === "delete") {
+      state.inputValue = state.inputValue.slice(0, -1);
+      state.completionCycle = null;
+      renderUI();
+      return;
+    }
+
+    if (!key.ctrl && !key.meta && typeof ch === "string" && ch.length > 0) {
+      state.inputValue += ch;
+      state.completionCycle = null;
+      renderUI();
+    }
+  }
+
+  function handleMainKey(ch: string, key: blessed.Widgets.Events.IKeyEventArg): void {
+    if (ch === "q") {
+      screen.destroy();
+      process.exit(0);
+      return;
+    }
+
+    if (key.name === "tab") {
+      state.focusPane = state.focusPane === "notes" ? "bodies" : "notes";
+      renderUI();
+      return;
+    }
+
+    const notesViewport = Math.max(1, (typeof notesList.height === "number" ? notesList.height : 10) - 2);
+    const bodyViewport = Math.max(1, lastBodyViewport);
+
+    if ((key.ctrl && key.name === "d") || ch === "J") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(Math.max(1, Math.floor(notesViewport / 2)));
+      } else {
+        scrollBodyBy(Math.max(1, Math.floor(bodyViewport / 2)));
+      }
+      return;
+    }
+
+    if ((key.ctrl && key.name === "u") || ch === "K") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(-Math.max(1, Math.floor(notesViewport / 2)));
+      } else {
+        scrollBodyBy(-Math.max(1, Math.floor(bodyViewport / 2)));
+      }
+      return;
+    }
+
+    if (ch === "k" || key.name === "up") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(-1);
+      } else {
+        scrollBodyBy(-1);
+      }
+      return;
+    }
+
+    if (ch === "j" || key.name === "down") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(1);
+      } else {
+        scrollBodyBy(1);
+      }
+      return;
+    }
+
+    if (ch === "g") {
+      if (state.focusPane === "notes") {
+        if (state.notes.length > 0) {
+          state.selectedIndex = 0;
+          const noteId = state.notes[0]?.id;
+          if (noteId) {
+            const cached = detailsCache.get(noteId);
+            if (cached) {
+              applyResolvedDetails(cached);
+              renderUI();
+            } else {
+              const token = detailLoadToken + 1;
+              detailLoadToken = token;
+              void loadDetails(noteId, token);
+            }
+          }
+        }
+      } else {
+        setBodyScroll(0);
+        renderUI();
+      }
+      return;
+    }
+
+    if (ch === "G") {
+      if (state.focusPane === "notes") {
+        if (state.notes.length > 0) {
+          state.selectedIndex = state.notes.length - 1;
+          const noteId = state.notes[state.selectedIndex]?.id;
+          if (noteId) {
+            const cached = detailsCache.get(noteId);
+            if (cached) {
+              applyResolvedDetails(cached);
+              renderUI();
+            } else {
+              const token = detailLoadToken + 1;
+              detailLoadToken = token;
+              void loadDetails(noteId, token);
+            }
+          }
+        }
+      } else {
+        setBodyScroll(Math.max(0, lastBodyRender.lines.length - lastBodyViewport));
+        renderUI();
+      }
+      return;
+    }
+
+    if (ch === "s") {
+      void runAction(async () => {
+        await refresh();
+      });
+      return;
+    }
+
+    if (ch === "t") {
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      setStatus(`Theme: ${state.theme}`);
+      renderUI();
+      return;
+    }
+
+    if (ch === "/") {
+      enterInputMode("search", "Search mode");
+      return;
+    }
+
+    if (ch === "n") {
+      enterInputMode("create", "Create note mode");
+      return;
+    }
+
+    if (ch === "b") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      enterInputMode("body", `Add body to ${selected.title}`);
+      return;
+    }
+
+    if (ch === "f") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      enterInputMode("follow", `Follow from ${selected.title}`);
+      return;
+    }
+
+    if (ch === "[") {
+      jumpToBodyIndex(state.details.activeBodyIndex - 1);
+      return;
+    }
+
+    if (ch === "]") {
+      jumpToBodyIndex(state.details.activeBodyIndex + 1);
+      return;
+    }
+
+    if (ch === "e") {
+      void runAction(async () => {
+        await editCurrentBodyInEditor();
+      });
+      return;
+    }
+
+    if (ch === "a") {
+      const selected = getSelectedNote();
       if (!selected || selected.archivedAt) {
         return;
       }
-      void (async () => {
-        try {
-          await core.archiveNote(selected.id);
-          await refresh();
-          setStatus(`Archived ${selected.title}`);
-        } catch (error) {
-          setStatus(`Error: ${(error as Error).message}`);
-        }
-      })();
+
+      void runAction(async () => {
+        await core.archiveNote(selected.id);
+        await refresh();
+        setStatus(`Archived ${selected.title}`);
+        renderUI();
+      });
       return;
     }
 
-    if (input === "r") {
+    if (ch === "r") {
+      const selected = getSelectedNote();
       if (!selected || !selected.archivedAt) {
         return;
       }
-      void (async () => {
-        try {
-          await core.restoreNote(selected.id);
-          await refresh(selected.id);
-          setStatus(`Restored ${selected.title}`);
-        } catch (error) {
-          setStatus(`Error: ${(error as Error).message}`);
-        }
-      })();
+
+      void runAction(async () => {
+        await core.restoreNote(selected.id);
+        await refresh(selected.id);
+        setStatus(`Restored ${selected.title}`);
+        renderUI();
+      });
       return;
     }
 
-    if (input === "x") {
-      const next = !includeArchived;
-      setIncludeArchived(next);
-      void refresh(undefined, next);
-      setStatus(next ? "Showing archived notes" : "Hiding archived notes");
+    if (ch === "x") {
+      void runAction(async () => {
+        const next = !state.includeArchived;
+        await refresh(undefined, next);
+        setStatus(next ? "Showing archived notes" : "Hiding archived notes");
+        renderUI();
+      });
     }
+  }
+
+  screen.on("keypress", (ch, key) => {
+    const input = ch ?? "";
+
+    if (key.ctrl && key.name === "c") {
+      screen.destroy();
+      process.exit(0);
+      return;
+    }
+
+    if (state.mode !== "none") {
+      handleInputMode(input, key);
+      return;
+    }
+
+    handleMainKey(input, key);
   });
 
-  const noteRows = listWindow(notes, selectedIndex);
+  screen.on("resize", () => {
+    renderUI();
+  });
 
-  return (
-    <Box flexDirection="column">
-      <Box marginBottom={1}>
-        <Text color="cyan">mimex TUI</Text>
-        <Text>  workspace={workspace}</Text>
-        <Text>  notes={notes.length}</Text>
-        <Text>  {includeArchived ? "all" : "active"}</Text>
-        <Text>  {loading ? "loading" : "ready"}</Text>
-      </Box>
-
-      <Box>
-        <Box flexDirection="column" width="45%" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text color="cyan">Notes</Text>
-          {noteRows.length === 0 ? (
-            <Text color="gray">No notes</Text>
-          ) : (
-            noteRows.map(({ note, selected: isSelected }) => (
-              <Text key={note.id} color={isSelected ? "green" : "white"}>
-                {isSelected ? ">" : " "} {note.title} [{noteStatus(note)}]
-              </Text>
-            ))
-          )}
-        </Box>
-
-        <Box flexDirection="column" width="55%" marginLeft={1} borderStyle="round" borderColor="cyan" paddingX={1}>
-          {!openedNote ? (
-            <Text color="gray">Select a note.</Text>
-          ) : (
-            <>
-              <Text color="green">{openedNote.note.title}</Text>
-              <Text>Status: {noteStatus(openedNote.note)}</Text>
-              <Text>Bodies: {openedNote.bodies.length}</Text>
-              {openedNote.bodies.length > 0 ? (
-                openedNote.bodies.slice(0, 4).map((body, idx) => (
-                  <Text key={body.id} color={idx === activeBodyIndex ? "yellow" : "white"}>
-                    {idx === activeBodyIndex ? ">" : " "} {body.label}: {clip(body.markdown, 60)}
-                  </Text>
-                ))
-              ) : (
-                <Text color="gray">(no bodies yet)</Text>
-              )}
-
-              <Text color="cyan">Hard links</Text>
-              {hardLinks.length === 0 ? (
-                <Text color="gray">(none)</Text>
-              ) : (
-                hardLinks.slice(0, 6).map((link) => <Text key={link.normalized}>- {link.raw}</Text>)
-              )}
-
-              <Text color="cyan">Top soft links</Text>
-              {softLinks.length === 0 ? (
-                <Text color="gray">(none)</Text>
-              ) : (
-                softLinks.slice(0, 6).map((link) => (
-                  <Text key={link.noteId}>
-                    - {link.title} (w={link.weight})
-                  </Text>
-                ))
-              )}
-            </>
-          )}
-        </Box>
-      </Box>
-
-      <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
-        {mode === "none" ? (
-          <Text>
-            {status} | keys: j/k nav, n new, b body, [/] body pick, e edit($EDITOR), / search, f follow, a archive, r restore, x archived, s refresh, q quit
-          </Text>
-        ) : (
-          <>
-            <Text color="yellow">{promptForMode(mode)}: </Text>
-            <TextInput value={inputValue} onChange={updateInputValue} onSubmit={() => void submitInput()} />
-            <Text color="gray">  (Tab cycles completions, Esc cancels)</Text>
-          </>
-        )}
-      </Box>
-    </Box>
-  );
+  void (async () => {
+    try {
+      await core.init();
+      await refresh();
+      renderUI();
+    } catch (error) {
+      screen.destroy();
+      process.stderr.write(`mimex tui failed: ${(error as Error).message}\n`);
+      process.exit(1);
+    }
+  })();
 }
 
-render(<App />);
+main();
