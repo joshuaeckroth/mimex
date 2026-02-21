@@ -61,6 +61,16 @@ interface BodyScrollChange {
   bodyIndexChanged: boolean;
 }
 
+interface BodyRenderCache {
+  openedNote: NoteWithBodies | null;
+  activeBodyIndex: number;
+  hardLinks: HardLink[];
+  softLinks: SoftLinkTarget[];
+  bodyTextWidth: number;
+  themeName: ThemeName;
+  render: BodyRender;
+}
+
 interface TuiState {
   theme: ThemeName;
   includeArchived: boolean;
@@ -105,6 +115,8 @@ const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "m
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
   "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
+const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
+const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 
 const THEMES: Record<ThemeName, ThemePalette> = {
   dark: {
@@ -575,6 +587,13 @@ function main(): void {
   let isBusy = false;
   let detailLoadToken = 0;
   let lastBodyRender: BodyRender = { lines: [], bodyStarts: [], hardLinkHits: [] };
+  let bodyRenderCache: BodyRenderCache | null = null;
+  let notesWindowSource: NoteMeta[] | null = null;
+  let notesWindowStart = 0;
+  let notesWindowEnd = 0;
+  let bodyWindowRender: BodyRender | null = null;
+  let bodyWindowStart = 0;
+  let bodyWindowEnd = 0;
   let lastBodyViewport = 1;
 
   const screen = blessed.screen({
@@ -1209,6 +1228,122 @@ function main(): void {
     notesList.setLabel(` Notes${state.focusPane === "notes" ? " (focus)" : ""} `);
   }
 
+  function resolveNotesWindow(totalItems: number, viewportItems: number, selectedIndex: number): { start: number; end: number } {
+    if (totalItems <= 0) {
+      return { start: 0, end: 0 };
+    }
+
+    const windowSize = Math.max(viewportItems, Math.min(totalItems, viewportItems * NOTES_RENDER_WINDOW_MULTIPLIER));
+    const maxStart = Math.max(0, totalItems - windowSize);
+    const centeredStart = selectedIndex - Math.floor((windowSize - viewportItems) / 2);
+    const start = Math.max(0, Math.min(maxStart, centeredStart));
+    return { start, end: Math.min(totalItems, start + windowSize) };
+  }
+
+  function syncNotesWindowItems(viewportItems: number): void {
+    const totalItems = state.notes.length;
+    if (totalItems === 0) {
+      if (notesWindowSource !== state.notes || notesWindowStart !== 0 || notesWindowEnd !== 0) {
+        notesList.setItems(["(no notes)"]);
+        notesWindowSource = state.notes;
+        notesWindowStart = 0;
+        notesWindowEnd = 0;
+      }
+      return;
+    }
+
+    const windowSize = Math.max(viewportItems, Math.min(totalItems, viewportItems * NOTES_RENDER_WINDOW_MULTIPLIER));
+    const existingWindowSize = notesWindowEnd - notesWindowStart;
+    const withinExistingWindow =
+      notesWindowSource === state.notes &&
+      existingWindowSize === windowSize &&
+      state.selectedIndex >= notesWindowStart &&
+      state.selectedIndex < notesWindowEnd;
+
+    if (withinExistingWindow) {
+      return;
+    }
+
+    const windowRange = resolveNotesWindow(totalItems, viewportItems, state.selectedIndex);
+    const items = state.notes
+      .slice(windowRange.start, windowRange.end)
+      .map((note) => `${note.title}${note.archivedAt ? " [archived]" : ""}`);
+    notesList.setItems(items);
+    notesWindowSource = state.notes;
+    notesWindowStart = windowRange.start;
+    notesWindowEnd = windowRange.end;
+  }
+
+  function updateNotesViewportDisplay(): void {
+    const notesViewport = Math.max(1, (typeof notesList.height === "number" ? notesList.height : 10) - 2);
+
+    if (state.notes.length === 0) {
+      state.selectedIndex = 0;
+      syncNotesWindowItems(notesViewport);
+      notesList.select(0);
+      notesList.scrollTo(0);
+      return;
+    }
+
+    state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.notes.length - 1));
+    syncNotesWindowItems(notesViewport);
+
+    const totalWindowItems = Math.max(0, notesWindowEnd - notesWindowStart);
+    if (totalWindowItems > 0) {
+      const localIndex = Math.max(0, Math.min(totalWindowItems - 1, state.selectedIndex - notesWindowStart));
+      notesList.select(localIndex);
+      notesList.scrollTo(localIndex);
+    } else {
+      notesList.select(0);
+      notesList.scrollTo(0);
+    }
+  }
+
+  function resolveBodyWindow(totalLines: number, viewportLines: number, scrollOffset: number): { start: number; end: number } {
+    if (totalLines <= 0) {
+      return { start: 0, end: 0 };
+    }
+
+    const windowSize = Math.max(viewportLines, Math.min(totalLines, viewportLines * BODY_RENDER_WINDOW_MULTIPLIER));
+    const maxStart = Math.max(0, totalLines - windowSize);
+    const centeredStart = scrollOffset - Math.floor((windowSize - viewportLines) / 2);
+    const start = Math.max(0, Math.min(maxStart, centeredStart));
+    return { start, end: Math.min(totalLines, start + windowSize) };
+  }
+
+  function syncBodyWindowItems(viewportLines: number): void {
+    const totalLines = lastBodyRender.lines.length;
+    if (totalLines === 0) {
+      if (bodyWindowRender !== lastBodyRender || bodyWindowStart !== 0 || bodyWindowEnd !== 0) {
+        bodyList.setItems([""]);
+        bodyWindowRender = lastBodyRender;
+        bodyWindowStart = 0;
+        bodyWindowEnd = 0;
+      }
+      return;
+    }
+
+    const windowSize = Math.max(viewportLines, Math.min(totalLines, viewportLines * BODY_RENDER_WINDOW_MULTIPLIER));
+    const visibleStart = state.bodyScrollOffset;
+    const visibleEnd = Math.min(totalLines, visibleStart + viewportLines);
+    const existingWindowSize = bodyWindowEnd - bodyWindowStart;
+    const withinExistingWindow =
+      bodyWindowRender === lastBodyRender &&
+      existingWindowSize === windowSize &&
+      visibleStart >= bodyWindowStart &&
+      visibleEnd <= bodyWindowEnd;
+
+    if (withinExistingWindow) {
+      return;
+    }
+
+    const windowRange = resolveBodyWindow(totalLines, viewportLines, visibleStart);
+    bodyList.setItems(lastBodyRender.lines.slice(windowRange.start, windowRange.end));
+    bodyWindowRender = lastBodyRender;
+    bodyWindowStart = windowRange.start;
+    bodyWindowEnd = windowRange.end;
+  }
+
   function updateBodyViewportDisplay(): void {
     const bodyViewport = Math.max(1, (typeof bodyList.height === "number" ? bodyList.height : 10) - 2);
     lastBodyViewport = bodyViewport;
@@ -1216,8 +1351,17 @@ function main(): void {
     const maxBodyScroll = Math.max(0, lastBodyRender.lines.length - bodyViewport);
     state.bodyScrollOffset = Math.max(0, Math.min(maxBodyScroll, state.bodyScrollOffset));
 
-    bodyList.select(state.bodyScrollOffset);
-    bodyList.scrollTo(state.bodyScrollOffset);
+    syncBodyWindowItems(bodyViewport);
+
+    const totalWindowLines = Math.max(0, bodyWindowEnd - bodyWindowStart);
+    if (totalWindowLines > 0) {
+      const localOffset = Math.max(0, Math.min(totalWindowLines - 1, state.bodyScrollOffset - bodyWindowStart));
+      bodyList.select(localOffset);
+      bodyList.scrollTo(localOffset);
+    } else {
+      bodyList.select(0);
+      bodyList.scrollTo(0);
+    }
 
     const visibleStart = lastBodyRender.lines.length === 0 ? 0 : state.bodyScrollOffset + 1;
     const visibleEnd = Math.min(state.bodyScrollOffset + bodyViewport, lastBodyRender.lines.length);
@@ -1249,6 +1393,34 @@ function main(): void {
     const cols = Math.max(80, getTerminalCols());
     setFooterContent(cols);
     screen.render();
+  }
+
+  function resolveBodyRender(bodyTextWidth: number, theme: ThemePalette): BodyRender {
+    const cached = bodyRenderCache;
+    if (
+      cached &&
+      cached.openedNote === state.details.openedNote &&
+      cached.activeBodyIndex === state.details.activeBodyIndex &&
+      cached.hardLinks === state.details.hardLinks &&
+      cached.softLinks === state.details.softLinks &&
+      cached.bodyTextWidth === bodyTextWidth &&
+      cached.themeName === state.theme
+    ) {
+      return cached.render;
+    }
+
+    const render = buildBodyRender(state.details, bodyTextWidth, theme);
+    bodyRenderCache = {
+      openedNote: state.details.openedNote,
+      activeBodyIndex: state.details.activeBodyIndex,
+      hardLinks: state.details.hardLinks,
+      softLinks: state.details.softLinks,
+      bodyTextWidth,
+      themeName: state.theme,
+      render
+    };
+
+    return render;
   }
 
   function renderUI(): void {
@@ -1295,29 +1467,12 @@ function main(): void {
     );
 
     applyPaneChrome(theme);
-
-    const notesItems =
-      state.notes.length === 0
-        ? ["(no notes)"]
-        : state.notes.map((note) => `${note.title}${note.archivedAt ? " [archived]" : ""}`);
-
-    notesList.setItems(notesItems);
-
-    if (state.notes.length > 0) {
-      state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.notes.length - 1));
-      notesList.select(state.selectedIndex);
-      notesList.scrollTo(state.selectedIndex);
-    } else {
-      state.selectedIndex = 0;
-      notesList.select(0);
-      notesList.scrollTo(0);
-    }
+    updateNotesViewportDisplay();
 
     const bodyTextWidth = Math.max(20, bodyWidth - 4);
-    const bodyRender = buildBodyRender(state.details, bodyTextWidth, theme);
+    const bodyRender = resolveBodyRender(bodyTextWidth, theme);
     lastBodyRender = bodyRender;
 
-    bodyList.setItems(bodyRender.lines.length === 0 ? [""] : bodyRender.lines);
     updateBodyViewportDisplay();
     setFooterContent(cols);
 
@@ -1669,7 +1824,7 @@ function main(): void {
     }
 
     if (!match && typeof withPos.selected === "number") {
-      match = resolveHitForLine(withPos.selected);
+      match = resolveHitForLine(bodyWindowStart + withPos.selected);
     }
 
     if (!match) {
