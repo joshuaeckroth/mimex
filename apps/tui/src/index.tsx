@@ -8,7 +8,7 @@ import blessed from "neo-blessed";
 import { extractHardLinks, MimexCore } from "@mimex/core";
 import type { FollowLinkResult, HardLink, NoteMeta, NoteWithBodies, SoftLinkTarget } from "@mimex/shared-types";
 
-type InputMode = "none" | "search" | "create" | "body" | "follow";
+type InputMode = "none" | "search" | "create" | "body" | "follow" | "confirmDelete";
 type FocusPane = "notes" | "bodies";
 type ThemeName = "dark" | "light";
 
@@ -48,6 +48,7 @@ interface TuiState {
   inputValue: string;
   completionCycle: CompletionCycle | null;
   bodyScrollOffset: number;
+  pendingDeleteNote: NoteMeta | null;
 }
 
 interface ThemePalette {
@@ -77,7 +78,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, n new, b body, / search, f follow, a archive, r restore, x archived, t theme, s refresh, q quit";
+  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, l less, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
 
 const THEMES: Record<ThemeName, ThemePalette> = {
   dark: {
@@ -163,6 +164,8 @@ function promptForMode(mode: InputMode): string {
       return "Body markdown";
     case "follow":
       return "Follow target";
+    case "confirmDelete":
+      return "Type DELETE to confirm permanent removal";
     default:
       return "";
   }
@@ -370,6 +373,28 @@ function bodyIndexForLine(bodyStarts: number[], line: number): number {
   return selected;
 }
 
+function renderBodyBreakMarker(
+  index: number,
+  total: number,
+  label: string,
+  id: string,
+  active: boolean,
+  width: number,
+  theme: ThemePalette
+): string {
+  const safeWidth = Math.max(8, width);
+  const shortId = id.slice(0, 8);
+  const markerText = `${active ? ">" : " "} [${index + 1}/${total}] ${label} (${shortId})`;
+  const clippedText = truncateForWidth(markerText, safeWidth);
+  const ruleWidth = Math.max(0, safeWidth - clippedText.length);
+  const rule = "-".repeat(ruleWidth);
+
+  const left = rule.length > 0 ? colorizeLine(rule, active ? theme.mdHeadingFg : theme.mdRuleFg) : "";
+  const escapedText = escapeBlessedTags(clippedText);
+  const right = active ? `{bold}${escapedText}{/bold}` : escapedText;
+  return `${left}${right}`;
+}
+
 function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme: ThemePalette): BodyRender {
   const { openedNote, activeBodyIndex, hardLinks, softLinks } = details;
 
@@ -393,18 +418,10 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme
 
   for (const [index, body] of openedNote.bodies.entries()) {
     bodyStarts.push(lines.length);
-    const prefix = index === activeBodyIndex ? ">" : " ";
     lines.push(
-      colorizeLine(
-        `${prefix} [${index + 1}/${openedNote.bodies.length}] ${escapeBlessedTags(body.label)} (${body.id}) updated ${body.updatedAt}`,
-        theme.mdMetaFg
-      )
+      renderBodyBreakMarker(index, openedNote.bodies.length, body.label, body.id, index === activeBodyIndex, bodyTextWidth, theme)
     );
     lines.push(...renderMarkdownForTui(body.markdown, Math.max(20, bodyTextWidth - 2), theme));
-
-    if (index < openedNote.bodies.length - 1) {
-      lines.push(colorizeLine("----------------------------------------------------------------", theme.mdRuleFg));
-    }
   }
 
   lines.push("");
@@ -449,7 +466,8 @@ function main(): void {
     status: "Starting...",
     inputValue: "",
     completionCycle: null,
-    bodyScrollOffset: 0
+    bodyScrollOffset: 0,
+    pendingDeleteNote: null
   };
 
   let isBusy = false;
@@ -782,6 +800,46 @@ function main(): void {
     }
   }
 
+  async function showCurrentBodyInLess(): Promise<void> {
+    const openedNote = state.details.openedNote;
+    if (!openedNote) {
+      setStatus("No note selected");
+      return;
+    }
+
+    const body = openedNote.bodies[state.details.activeBodyIndex];
+    if (!body) {
+      setStatus("No note body selected");
+      return;
+    }
+
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mimex-less-"));
+    const tmpPath = path.join(tmpDir, `${openedNote.note.id}-${body.id}.md`);
+
+    try {
+      await writeFile(tmpPath, body.markdown, "utf8");
+      setStatus("Opening less...");
+      renderUI();
+
+      const screenWithAlt = screen as blessed.Widgets.Screen & { leave?: () => void; enter?: () => void };
+      screenWithAlt.leave?.();
+      const child = spawnSync("less", [tmpPath], {
+        stdio: "inherit",
+        shell: true
+      });
+      screenWithAlt.enter?.();
+
+      if (child.error) {
+        throw child.error;
+      }
+
+      setStatus(`Viewed raw body ${body.label} in less`);
+      renderUI();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
   function completionCandidatesForMode(mode: InputMode): string[] {
     const titleAndAlias = uniqueSorted(state.notes.flatMap((note) => [note.title, ...note.aliases]));
     const noteRefs = uniqueSorted(state.notes.flatMap((note) => [note.id, note.title, ...note.aliases]));
@@ -915,10 +973,33 @@ function main(): void {
   async function submitInput(): Promise<void> {
     const value = state.inputValue.trim();
     const currentMode = state.mode;
+    const pendingDeleteNote = state.pendingDeleteNote;
 
     state.mode = "none";
     state.inputValue = "";
     state.completionCycle = null;
+    state.pendingDeleteNote = null;
+
+    if (currentMode === "confirmDelete") {
+      if (!pendingDeleteNote) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      if (value !== "DELETE") {
+        setStatus(`Delete cancelled for ${pendingDeleteNote.title}`);
+        renderUI();
+        return;
+      }
+
+      await core.deleteNote(pendingDeleteNote.id);
+      detailsCache.delete(pendingDeleteNote.id);
+      await refresh();
+      setStatus(`Deleted ${pendingDeleteNote.title}`);
+      renderUI();
+      return;
+    }
 
     if (!value) {
       setStatus("Cancelled empty input");
@@ -1047,7 +1128,7 @@ function main(): void {
     const notesItems =
       state.notes.length === 0
         ? ["(no notes)"]
-        : state.notes.map((note) => `${note.title} [${noteStatus(note)}]`);
+        : state.notes.map((note) => `${note.title}${note.archivedAt ? " [archived]" : ""}`);
 
     notesList.setItems(notesItems);
 
@@ -1111,12 +1192,17 @@ function main(): void {
       state.mode = "none";
       state.inputValue = "";
       state.completionCycle = null;
+      state.pendingDeleteNote = null;
       setStatus("Input cancelled");
       renderUI();
       return;
     }
 
     if (key.name === "tab") {
+      if (state.mode === "confirmDelete") {
+        return;
+      }
+
       advanceCompletion();
       renderUI();
       return;
@@ -1312,6 +1398,26 @@ function main(): void {
       void runAction(async () => {
         await editCurrentBodyInEditor();
       });
+      return;
+    }
+
+    if (ch === "l") {
+      void runAction(async () => {
+        await showCurrentBodyInLess();
+      });
+      return;
+    }
+
+    if (ch === "D") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      state.pendingDeleteNote = selected;
+      enterInputMode("confirmDelete", `Delete ${selected.title}? This is permanent.`);
       return;
     }
 

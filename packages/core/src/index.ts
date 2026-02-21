@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type {
@@ -197,6 +197,49 @@ export class MimexCore {
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: restore ${note.title}`);
     return this.getNote(note.id);
+  }
+
+  async deleteNote(noteRef: string): Promise<NoteMeta> {
+    await this.init();
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${noteRef}`);
+    }
+
+    await rm(this.noteDir(note.id), { recursive: true, force: true });
+
+    const store = await this.readSoftLinkStore();
+    let changed = false;
+
+    if (store.edges[note.id]) {
+      delete store.edges[note.id];
+      changed = true;
+    }
+
+    for (const [src, targets] of Object.entries(store.edges)) {
+      if (targets[note.id] !== undefined) {
+        delete targets[note.id];
+        changed = true;
+      }
+      if (Object.keys(targets).length === 0) {
+        delete store.edges[src];
+        changed = true;
+      }
+    }
+
+    const filteredEvents = store.events.filter((event) => event.src !== note.id && event.dst !== note.id);
+    if (filteredEvents.length !== store.events.length) {
+      store.events = filteredEvents;
+      changed = true;
+    }
+
+    if (changed) {
+      await writeFile(this.softLinksPath(), JSON.stringify(store, null, 2), "utf8");
+    }
+
+    await this.autoCommitWorkspace(`note: delete ${note.title}`);
+    return note;
   }
 
   async getNote(noteRef: string): Promise<NoteWithBodies> {

@@ -102,6 +102,23 @@ describe("MimexCore", () => {
     expect(listed.map((note) => note.title)).toContain("Restore Me");
   });
 
+  it("deletes notes permanently and clears soft-link references", async () => {
+    const core = await newCore();
+    await core.createNote({ title: "Source", markdown: "[[Target]]" });
+    await core.createNote({ title: "Target", markdown: "body" });
+    await core.followLink("Source", "Target");
+
+    const deleted = await core.deleteNote("Target");
+    expect(deleted.title).toBe("Target");
+
+    const listedAll = await core.listNotes({ includeArchived: true });
+    expect(listedAll.map((note) => note.title)).not.toContain("Target");
+    await expect(core.getNote("Target")).rejects.toThrow(/note not found/i);
+
+    const top = await core.getTopSoftLinks("Source", 5);
+    expect(top).toHaveLength(0);
+  });
+
   it("updates existing body markdown", async () => {
     const core = await newCore();
     const created = await core.createNote({ title: "Editable", markdown: "before" });
