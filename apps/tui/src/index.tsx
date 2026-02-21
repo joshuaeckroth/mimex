@@ -34,6 +34,31 @@ interface ResolvedNoteDetails {
 interface BodyRender {
   lines: string[];
   bodyStarts: number[];
+  hardLinkHits: BodyHardLinkHit[];
+}
+
+interface BodyHardLinkHit {
+  line: number;
+  start: number;
+  end: number;
+  target: string;
+}
+
+interface MarkdownHardLinkHit {
+  line: number;
+  start: number;
+  end: number;
+  target: string;
+}
+
+interface MarkdownRender {
+  lines: string[];
+  hardLinkHits: MarkdownHardLinkHit[];
+}
+
+interface BodyScrollChange {
+  offsetChanged: boolean;
+  bodyIndexChanged: boolean;
 }
 
 interface TuiState {
@@ -71,6 +96,7 @@ interface ThemePalette {
   mdCodeFg: string;
   mdRuleFg: string;
   mdMetaFg: string;
+  mdLinkFg: string;
 }
 
 const defaultWorkspace = process.env.MIMEX_WORKSPACE_PATH ?? path.resolve(process.cwd(), "data/workspaces/local");
@@ -78,7 +104,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, l less, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
+  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
 
 const THEMES: Record<ThemeName, ThemePalette> = {
   dark: {
@@ -92,15 +118,16 @@ const THEMES: Record<ThemeName, ThemePalette> = {
     bodyItemFg: "white",
     notesSelectedFg: "black",
     notesSelectedBg: "white",
-    bodySelectedFg: "black",
-    bodySelectedBg: "white",
+    bodySelectedFg: "white",
+    bodySelectedBg: "black",
     borderFocused: "white",
     borderBlurred: "gray",
     mdHeadingFg: "cyan",
     mdQuoteFg: "magenta",
     mdCodeFg: "yellow",
     mdRuleFg: "gray",
-    mdMetaFg: "green"
+    mdMetaFg: "green",
+    mdLinkFg: "cyan"
   },
   light: {
     headerBg: "white",
@@ -113,15 +140,16 @@ const THEMES: Record<ThemeName, ThemePalette> = {
     bodyItemFg: "gray",
     notesSelectedFg: "white",
     notesSelectedBg: "black",
-    bodySelectedFg: "white",
-    bodySelectedBg: "black",
+    bodySelectedFg: "black",
+    bodySelectedBg: "white",
     borderFocused: "black",
     borderBlurred: "gray",
     mdHeadingFg: "blue",
     mdQuoteFg: "magenta",
     mdCodeFg: "green",
     mdRuleFg: "gray",
-    mdMetaFg: "black"
+    mdMetaFg: "black",
+    mdLinkFg: "blue"
   }
 };
 
@@ -243,33 +271,86 @@ function colorizeLine(input: string, fg: string, bold = false): string {
   return `{${fg}-fg}${input}{/${fg}-fg}`;
 }
 
-function formatInlineMarkdown(input: string): string {
-  return escapeBlessedTags(input)
+function normalizeInlineMarkdown(input: string): string {
+  return input
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_all, alt: string, url: string) => `image: ${alt || "untitled"} <${url}>`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_all, label: string, url: string) => `${label} <${url}>`);
 }
 
-function pushWrappedWithPrefix(lines: string[], prefix: string, text: string, width: number): void {
+function styleLineWithHardLinks(
+  plainLine: string,
+  theme: ThemePalette,
+  style?: { fg?: string; bold?: boolean }
+): { styled: string; hits: Omit<MarkdownHardLinkHit, "line">[] } {
+  const hardLinkPattern = /\[\[([^\]\n]+?)\]\]/g;
+  const hits: Omit<MarkdownHardLinkHit, "line">[] = [];
+  let styled = "";
+  let cursor = 0;
+  let scanIndex = 0;
+
+  for (const match of plainLine.matchAll(hardLinkPattern)) {
+    const raw = match[0] ?? "";
+    const target = (match[1] ?? "").trim();
+    const matchStart = match.index ?? 0;
+    const before = plainLine.slice(scanIndex, matchStart);
+    if (before.length > 0) {
+      styled += escapeBlessedTags(before);
+      cursor += before.length;
+    }
+
+    const escapedRaw = escapeBlessedTags(raw);
+    styled += `{${theme.mdLinkFg}-fg}${escapedRaw}{/${theme.mdLinkFg}-fg}`;
+    hits.push({
+      start: cursor,
+      end: cursor + raw.length,
+      target: target || raw
+    });
+    cursor += raw.length;
+    scanIndex = matchStart + raw.length;
+  }
+
+  const tail = plainLine.slice(scanIndex);
+  if (tail.length > 0) {
+    styled += escapeBlessedTags(tail);
+  }
+
+  if (style?.fg) {
+    styled = `{${style.fg}-fg}${styled}{/${style.fg}-fg}`;
+  }
+
+  if (style?.bold) {
+    styled = `{bold}${styled}{/bold}`;
+  }
+
+  return { styled, hits };
+}
+
+function pushWrappedMarkdown(
+  lines: string[],
+  hardLinkHits: MarkdownHardLinkHit[],
+  prefix: string,
+  text: string,
+  width: number,
+  theme: ThemePalette,
+  style?: { fg?: string; bold?: boolean }
+): void {
   const effectiveWidth = Math.max(8, width - prefix.length);
   const wrapped = wrapToWidth(text, effectiveWidth);
+
   for (const [index, chunk] of wrapped.entries()) {
-    lines.push(`${index === 0 ? prefix : " ".repeat(prefix.length)}${chunk || " "}`);
+    const line = `${index === 0 ? prefix : " ".repeat(prefix.length)}${chunk || " "}`;
+    const rendered = styleLineWithHardLinks(line, theme, style);
+    const lineIndex = lines.length;
+    lines.push(rendered.styled);
+    for (const hit of rendered.hits) {
+      hardLinkHits.push({ line: lineIndex, ...hit });
+    }
   }
 }
 
-function pushWrappedStyled(lines: string[], prefix: string, text: string, width: number, fg?: string, bold = false): void {
-  const start = lines.length;
-  pushWrappedWithPrefix(lines, prefix, text, width);
-  if (!fg) {
-    return;
-  }
-  for (let idx = start; idx < lines.length; idx += 1) {
-    lines[idx] = colorizeLine(lines[idx] ?? "", fg, bold);
-  }
-}
-
-function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalette): string[] {
+function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalette): MarkdownRender {
   const lines: string[] = [];
+  const hardLinkHits: MarkdownHardLinkHit[] = [];
   let inCodeBlock = false;
   const maxRule = Math.max(8, Math.min(64, width - 2));
 
@@ -295,24 +376,27 @@ function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalet
     }
 
     if (inCodeBlock) {
-      pushWrappedStyled(lines, "    ", formatInlineMarkdown(line), width, theme.mdCodeFg);
+      pushWrappedMarkdown(lines, hardLinkHits, "    ", normalizeInlineMarkdown(line), width, theme, { fg: theme.mdCodeFg });
       continue;
     }
 
     const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
     if (heading) {
       const level = heading[1].length;
-      const headingText = formatInlineMarkdown(heading[2].trim());
+      const headingText = normalizeInlineMarkdown(heading[2].trim());
       if (lines.length > 0 && lines[lines.length - 1] !== "") {
         lines.push("");
       }
 
       if (level <= 2) {
-        pushWrappedStyled(lines, "  ", headingText, width, theme.mdHeadingFg, true);
+        pushWrappedMarkdown(lines, hardLinkHits, "  ", headingText, width, theme, { fg: theme.mdHeadingFg, bold: true });
         lines.push(colorizeLine(`  ${(level === 1 ? "=" : "-").repeat(maxRule)}`.slice(0, width), theme.mdHeadingFg));
         lines.push("");
       } else {
-        pushWrappedStyled(lines, `  ${"#".repeat(level)} `, headingText, width, theme.mdHeadingFg, true);
+        pushWrappedMarkdown(lines, hardLinkHits, `  ${"#".repeat(level)} `, headingText, width, theme, {
+          fg: theme.mdHeadingFg,
+          bold: true
+        });
       }
       continue;
     }
@@ -324,7 +408,7 @@ function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalet
 
     const quote = line.match(/^\s*>\s?(.*)$/);
     if (quote) {
-      pushWrappedStyled(lines, "  | ", formatInlineMarkdown(quote[1].trim()), width, theme.mdQuoteFg);
+      pushWrappedMarkdown(lines, hardLinkHits, "  | ", normalizeInlineMarkdown(quote[1].trim()), width, theme, { fg: theme.mdQuoteFg });
       continue;
     }
 
@@ -332,28 +416,34 @@ function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalet
     if (task) {
       const indent = "  ".repeat(Math.floor(task[1].length / 2));
       const mark = task[2].toLowerCase() === "x" ? "[x]" : "[ ]";
-      pushWrappedStyled(lines, `  ${indent}- ${mark} `, formatInlineMarkdown(task[3].trim()), width, theme.mdMetaFg);
+      pushWrappedMarkdown(lines, hardLinkHits, `  ${indent}- ${mark} `, normalizeInlineMarkdown(task[3].trim()), width, theme, {
+        fg: theme.mdMetaFg
+      });
       continue;
     }
 
     const bullet = line.match(/^(\s*)[-*+]\s+(.+)$/);
     if (bullet) {
       const indent = "  ".repeat(Math.floor(bullet[1].length / 2));
-      pushWrappedStyled(lines, `  ${indent}- `, formatInlineMarkdown(bullet[2].trim()), width, theme.mdMetaFg);
+      pushWrappedMarkdown(lines, hardLinkHits, `  ${indent}- `, normalizeInlineMarkdown(bullet[2].trim()), width, theme, {
+        fg: theme.mdMetaFg
+      });
       continue;
     }
 
     const ordered = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
     if (ordered) {
       const indent = "  ".repeat(Math.floor(ordered[1].length / 2));
-      pushWrappedStyled(lines, `  ${indent}${ordered[2]}. `, formatInlineMarkdown(ordered[3].trim()), width, theme.mdMetaFg);
+      pushWrappedMarkdown(lines, hardLinkHits, `  ${indent}${ordered[2]}. `, normalizeInlineMarkdown(ordered[3].trim()), width, theme, {
+        fg: theme.mdMetaFg
+      });
       continue;
     }
 
-    pushWrappedWithPrefix(lines, "  ", formatInlineMarkdown(line), width);
+    pushWrappedMarkdown(lines, hardLinkHits, "  ", normalizeInlineMarkdown(line), width, theme);
   }
 
-  return lines;
+  return { lines, hardLinkHits };
 }
 
 function bodyIndexForLine(bodyStarts: number[], line: number): number {
@@ -401,12 +491,14 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme
   if (!openedNote) {
     return {
       lines: ["Select a note.", "", "Hard links: 0", "Top soft: (none)"],
-      bodyStarts: []
+      bodyStarts: [],
+      hardLinkHits: []
     };
   }
 
   const lines: string[] = [];
   const bodyStarts: number[] = [];
+  const hardLinkHits: BodyHardLinkHit[] = [];
 
   lines.push(colorizeLine(escapeBlessedTags(openedNote.note.title), theme.mdHeadingFg, true));
   lines.push(colorizeLine(`Status: ${noteStatus(openedNote.note)} | Bodies: ${openedNote.bodies.length}`, theme.mdMetaFg));
@@ -421,7 +513,17 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme
     lines.push(
       renderBodyBreakMarker(index, openedNote.bodies.length, body.label, body.id, index === activeBodyIndex, bodyTextWidth, theme)
     );
-    lines.push(...renderMarkdownForTui(body.markdown, Math.max(20, bodyTextWidth - 2), theme));
+    const markdownStart = lines.length;
+    const markdownRender = renderMarkdownForTui(body.markdown, Math.max(20, bodyTextWidth - 2), theme);
+    lines.push(...markdownRender.lines);
+    for (const hit of markdownRender.hardLinkHits) {
+      hardLinkHits.push({
+        line: markdownStart + hit.line,
+        start: hit.start,
+        end: hit.end,
+        target: hit.target
+      });
+    }
   }
 
   lines.push("");
@@ -443,7 +545,7 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme
     lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
   }
 
-  return { lines, bodyStarts };
+  return { lines, bodyStarts, hardLinkHits };
 }
 
 function main(): void {
@@ -472,7 +574,7 @@ function main(): void {
 
   let isBusy = false;
   let detailLoadToken = 0;
-  let lastBodyRender: BodyRender = { lines: [], bodyStarts: [] };
+  let lastBodyRender: BodyRender = { lines: [], bodyStarts: [], hardLinkHits: [] };
   let lastBodyViewport = 1;
 
   const screen = blessed.screen({
@@ -901,7 +1003,9 @@ function main(): void {
     setStatus(`Completion ${nextIndex + 1}/${cycle.matches.length}`);
   }
 
-  function setBodyScroll(next: number): void {
+  function setBodyScroll(next: number): BodyScrollChange {
+    const previousOffset = state.bodyScrollOffset;
+    const previousBodyIndex = state.details.activeBodyIndex;
     const maxBodyScroll = Math.max(0, lastBodyRender.lines.length - lastBodyViewport);
     const clamped = Math.max(0, Math.min(maxBodyScroll, next));
     state.bodyScrollOffset = clamped;
@@ -909,17 +1013,29 @@ function main(): void {
     if ((state.details.openedNote?.bodies.length ?? 0) > 0) {
       state.details.activeBodyIndex = bodyIndexForLine(lastBodyRender.bodyStarts, clamped);
     }
+
+    return {
+      offsetChanged: previousOffset !== state.bodyScrollOffset,
+      bodyIndexChanged: previousBodyIndex !== state.details.activeBodyIndex
+    };
   }
 
   function scrollBodyBy(delta: number): void {
     if (!state.details.openedNote || state.details.openedNote.bodies.length === 0) {
       setStatus("No note bodies to scroll");
+      renderFooterOnly();
+      return;
+    }
+
+    const change = setBodyScroll(state.bodyScrollOffset + delta);
+    if (change.bodyIndexChanged) {
       renderUI();
       return;
     }
 
-    setBodyScroll(state.bodyScrollOffset + delta);
-    renderUI();
+    if (change.offsetChanged) {
+      renderBodyViewportOnly();
+    }
   }
 
   function jumpToBodyIndex(targetIndex: number): void {
@@ -1076,6 +1192,65 @@ function main(): void {
     }
   }
 
+  function modeLineForWidth(cols: number): string {
+    return state.mode === "none"
+      ? truncateForWidth(KEY_HINTS, cols)
+      : truncateForWidth(`${promptForMode(state.mode)}: ${state.inputValue}_  (Tab completion, Enter submit, Esc cancel)`, cols);
+  }
+
+  function setFooterContent(cols: number): void {
+    const statusLine = truncateForWidth(state.status, cols);
+    footer.setContent(`${statusLine}\n${modeLineForWidth(cols)}`);
+  }
+
+  function applyPaneChrome(theme: ThemePalette): void {
+    notesList.style.border = { fg: state.focusPane === "notes" ? theme.borderFocused : theme.borderBlurred };
+    bodyList.style.border = { fg: state.focusPane === "bodies" ? theme.borderFocused : theme.borderBlurred };
+    notesList.setLabel(` Notes${state.focusPane === "notes" ? " (focus)" : ""} `);
+  }
+
+  function updateBodyViewportDisplay(): void {
+    const bodyViewport = Math.max(1, (typeof bodyList.height === "number" ? bodyList.height : 10) - 2);
+    lastBodyViewport = bodyViewport;
+
+    const maxBodyScroll = Math.max(0, lastBodyRender.lines.length - bodyViewport);
+    state.bodyScrollOffset = Math.max(0, Math.min(maxBodyScroll, state.bodyScrollOffset));
+
+    bodyList.select(state.bodyScrollOffset);
+    bodyList.scrollTo(state.bodyScrollOffset);
+
+    const visibleStart = lastBodyRender.lines.length === 0 ? 0 : state.bodyScrollOffset + 1;
+    const visibleEnd = Math.min(state.bodyScrollOffset + bodyViewport, lastBodyRender.lines.length);
+    bodyList.setLabel(
+      ` Bodies${state.focusPane === "bodies" ? " (focus)" : ""} lines ${visibleStart}-${visibleEnd}/${lastBodyRender.lines.length} `
+    );
+  }
+
+  function renderFooterOnly(): void {
+    const cols = Math.max(80, getTerminalCols());
+    footer.width = cols;
+    setFooterContent(cols);
+    screen.render();
+  }
+
+  function renderPaneChromeOnly(): void {
+    const theme = THEMES[state.theme];
+    applyPaneChrome(theme);
+    updateBodyViewportDisplay();
+
+    const cols = Math.max(80, getTerminalCols());
+    setFooterContent(cols);
+    screen.render();
+  }
+
+  function renderBodyViewportOnly(): void {
+    updateBodyViewportDisplay();
+
+    const cols = Math.max(80, getTerminalCols());
+    setFooterContent(cols);
+    screen.render();
+  }
+
   function renderUI(): void {
     const rows = Math.max(12, getTerminalRows());
     const cols = Math.max(80, getTerminalCols());
@@ -1119,11 +1294,7 @@ function main(): void {
       )
     );
 
-    notesList.style.border = { fg: state.focusPane === "notes" ? theme.borderFocused : theme.borderBlurred };
-    bodyList.style.border = { fg: state.focusPane === "bodies" ? theme.borderFocused : theme.borderBlurred };
-
-    notesList.setLabel(` Notes${state.focusPane === "notes" ? " (focus)" : ""} `);
-    bodyList.setLabel(` Bodies${state.focusPane === "bodies" ? " (focus)" : ""} `);
+    applyPaneChrome(theme);
 
     const notesItems =
       state.notes.length === 0
@@ -1146,29 +1317,9 @@ function main(): void {
     const bodyRender = buildBodyRender(state.details, bodyTextWidth, theme);
     lastBodyRender = bodyRender;
 
-    const bodyViewport = Math.max(1, contentHeight - 2);
-    lastBodyViewport = bodyViewport;
-
-    const maxBodyScroll = Math.max(0, bodyRender.lines.length - bodyViewport);
-    state.bodyScrollOffset = Math.max(0, Math.min(maxBodyScroll, state.bodyScrollOffset));
-
     bodyList.setItems(bodyRender.lines.length === 0 ? [""] : bodyRender.lines);
-    bodyList.select(state.bodyScrollOffset);
-    bodyList.scrollTo(state.bodyScrollOffset);
-
-    const visibleStart = bodyRender.lines.length === 0 ? 0 : state.bodyScrollOffset + 1;
-    const visibleEnd = Math.min(state.bodyScrollOffset + bodyViewport, bodyRender.lines.length);
-    bodyList.setLabel(
-      ` Bodies${state.focusPane === "bodies" ? " (focus)" : ""} lines ${visibleStart}-${visibleEnd}/${bodyRender.lines.length} `
-    );
-
-    const modeLine =
-      state.mode === "none"
-        ? truncateForWidth(KEY_HINTS, cols)
-        : truncateForWidth(`${promptForMode(state.mode)}: ${state.inputValue}_  (Tab completion, Enter submit, Esc cancel)`, cols);
-
-    const statusLine = truncateForWidth(state.status, cols);
-    footer.setContent(`${statusLine}\n${modeLine}`);
+    updateBodyViewportDisplay();
+    setFooterContent(cols);
 
     if (selected) {
       debugLog(
@@ -1184,7 +1335,7 @@ function main(): void {
     state.inputValue = "";
     state.completionCycle = null;
     setStatus(statusMessage);
-    renderUI();
+    renderFooterOnly();
   }
 
   function handleInputMode(ch: string, key: blessed.Widgets.Events.IKeyEventArg): void {
@@ -1194,7 +1345,7 @@ function main(): void {
       state.completionCycle = null;
       state.pendingDeleteNote = null;
       setStatus("Input cancelled");
-      renderUI();
+      renderFooterOnly();
       return;
     }
 
@@ -1204,7 +1355,7 @@ function main(): void {
       }
 
       advanceCompletion();
-      renderUI();
+      renderFooterOnly();
       return;
     }
 
@@ -1218,21 +1369,21 @@ function main(): void {
     if (key.ctrl && key.name === "u") {
       state.inputValue = "";
       state.completionCycle = null;
-      renderUI();
+      renderFooterOnly();
       return;
     }
 
     if (key.name === "backspace" || key.name === "delete") {
       state.inputValue = state.inputValue.slice(0, -1);
       state.completionCycle = null;
-      renderUI();
+      renderFooterOnly();
       return;
     }
 
     if (!key.ctrl && !key.meta && typeof ch === "string" && ch.length > 0) {
       state.inputValue += ch;
       state.completionCycle = null;
-      renderUI();
+      renderFooterOnly();
     }
   }
 
@@ -1245,7 +1396,7 @@ function main(): void {
 
     if (key.name === "tab") {
       state.focusPane = state.focusPane === "notes" ? "bodies" : "notes";
-      renderUI();
+      renderPaneChromeOnly();
       return;
     }
 
@@ -1306,8 +1457,12 @@ function main(): void {
           }
         }
       } else {
-        setBodyScroll(0);
-        renderUI();
+        const change = setBodyScroll(0);
+        if (change.bodyIndexChanged) {
+          renderUI();
+        } else if (change.offsetChanged) {
+          renderBodyViewportOnly();
+        }
       }
       return;
     }
@@ -1330,8 +1485,12 @@ function main(): void {
           }
         }
       } else {
-        setBodyScroll(Math.max(0, lastBodyRender.lines.length - lastBodyViewport));
-        renderUI();
+        const change = setBodyScroll(Math.max(0, lastBodyRender.lines.length - lastBodyViewport));
+        if (change.bodyIndexChanged) {
+          renderUI();
+        } else if (change.offsetChanged) {
+          renderBodyViewportOnly();
+        }
       }
       return;
     }
@@ -1461,6 +1620,69 @@ function main(): void {
     }
   }
 
+  function handleBodyClick(data: { x?: number; y?: number }): void {
+    if (state.mode !== "none") {
+      return;
+    }
+
+    const selected = getSelectedNote();
+    if (!selected) {
+      return;
+    }
+
+    const resolveHitForLine = (line: number, col?: number): BodyHardLinkHit | null => {
+      const lineHits = lastBodyRender.hardLinkHits.filter((hit) => hit.line === line);
+      if (lineHits.length === 0) {
+        return null;
+      }
+
+      if (typeof col === "number") {
+        const exact = lineHits.find((hit) => col >= hit.start && col < hit.end);
+        if (exact) {
+          return exact;
+        }
+      }
+
+      if (lineHits.length === 1) {
+        return lineHits[0] ?? null;
+      }
+
+      return null;
+    };
+
+    let match: BodyHardLinkHit | null = null;
+
+    const withPos = bodyList as blessed.Widgets.ListElement & {
+      selected?: number;
+      lpos?: { xi: number; xl: number; yi: number; yl: number };
+    };
+    const lpos = withPos.lpos;
+    if (lpos && typeof data.x === "number" && typeof data.y === "number") {
+      const contentX = data.x - lpos.xi - 1;
+      const contentY = data.y - lpos.yi - 1;
+      const contentWidth = Math.max(0, lpos.xl - lpos.xi - 1);
+      const contentHeight = Math.max(0, lpos.yl - lpos.yi - 1);
+      if (contentX >= 0 && contentY >= 0 && contentX < contentWidth && contentY < contentHeight) {
+        const line = state.bodyScrollOffset + contentY;
+        match = resolveHitForLine(line, contentX);
+      }
+    }
+
+    if (!match && typeof withPos.selected === "number") {
+      match = resolveHitForLine(withPos.selected);
+    }
+
+    if (!match) {
+      return;
+    }
+
+    state.focusPane = "bodies";
+    void runAction(async () => {
+      await followAndShow(selected.id, match.target);
+      renderUI();
+    });
+  }
+
   screen.on("keypress", (ch, key) => {
     const input = ch ?? "";
 
@@ -1477,6 +1699,17 @@ function main(): void {
 
     handleMainKey(input, key);
   });
+
+  bodyList.on("click", (data: unknown) => {
+    handleBodyClick(data as { x?: number; y?: number });
+  });
+
+  (bodyList as blessed.Widgets.ListElement & { on(event: string, listener: (...args: unknown[]) => void): void }).on(
+    "element click",
+    (_item: unknown, data: unknown) => {
+      handleBodyClick(data as { x?: number; y?: number });
+    }
+  );
 
   screen.on("resize", () => {
     renderUI();
