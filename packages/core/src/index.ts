@@ -14,7 +14,8 @@ import type {
   NoteWithBodies,
   SearchResult,
   SoftLinkEvent,
-  SoftLinkTarget
+  SoftLinkTarget,
+  UpdateBodyInput
 } from "@mimex/shared-types";
 
 const NOTES_DIR = "notes";
@@ -131,6 +132,33 @@ export class MimexCore {
     await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: add body ${note.title}`);
+
+    return this.getNote(note.id);
+  }
+
+  async updateBody(input: UpdateBodyInput): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(input.noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${input.noteRef}`);
+    }
+    if (isArchived(note)) {
+      throw new Error(`note is archived: ${note.title}`);
+    }
+
+    const body = note.bodies.find((entry) => entry.id === input.bodyId);
+    if (!body) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
+
+    const now = new Date().toISOString();
+    body.updatedAt = now;
+    note.updatedAt = now;
+
+    await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: update body ${note.title}`);
 
     return this.getNote(note.id);
   }

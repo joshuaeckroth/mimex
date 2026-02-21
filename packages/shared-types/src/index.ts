@@ -77,3 +77,9 @@ export interface AddBodyInput {
 export interface NoteQueryOptions {
   includeArchived?: boolean;
 }
+
+export interface UpdateBodyInput {
+  noteRef: string;
+  bodyId: string;
+  markdown: string;
+}

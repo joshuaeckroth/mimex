@@ -47,6 +47,10 @@ const addBodySchema = z.object({
   label: z.string().optional()
 });
 
+const updateBodySchema = z.object({
+  markdown: z.string()
+});
+
 const followLinkSchema = z.object({
   source: z.string().min(1),
   target: z.string().min(1)
@@ -111,6 +115,23 @@ app.post("/api/notes/:noteRef/bodies", async (request, reply) => {
   try {
     const note = await core.addBody({ noteRef: params.noteRef, ...parsed.data });
     return reply.code(201).send(note);
+  } catch (error) {
+    return reply.code(404).send({ error: (error as Error).message });
+  }
+});
+
+app.put("/api/notes/:noteRef/bodies/:bodyId", async (request, reply) => {
+  const core = await getCore(request.headers["x-user-id"] as string | undefined);
+  const params = z.object({ noteRef: z.string().min(1), bodyId: z.string().min(1) }).parse(request.params);
+  const parsed = updateBodySchema.safeParse(request.body);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: parsed.error.flatten() });
+  }
+
+  try {
+    const note = await core.updateBody({ noteRef: params.noteRef, bodyId: params.bodyId, markdown: parsed.data.markdown });
+    return reply.code(200).send(note);
   } catch (error) {
     return reply.code(404).send({ error: (error as Error).message });
   }

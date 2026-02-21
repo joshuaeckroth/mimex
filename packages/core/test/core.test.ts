@@ -101,6 +101,21 @@ describe("MimexCore", () => {
     const listed = await core.listNotes();
     expect(listed.map((note) => note.title)).toContain("Restore Me");
   });
+
+  it("updates existing body markdown", async () => {
+    const core = await newCore();
+    const created = await core.createNote({ title: "Editable", markdown: "before" });
+    const bodyId = created.note.bodies[0]?.id;
+    expect(bodyId).toBeTruthy();
+
+    const updated = await core.updateBody({
+      noteRef: "Editable",
+      bodyId: bodyId ?? "",
+      markdown: "after edit"
+    });
+
+    expect(updated.bodies[0]?.markdown).toBe("after edit");
+  });
 });
 
 describe("extractHardLinks", () => {
