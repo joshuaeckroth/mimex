@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractNotionReferencesFromToolResult, planNotesHeuristic } from "../src/importers/notion.js";
+import { extractNotionReferencesFromToolResult, extractParsedNotionContent, planNotesHeuristic } from "../src/importers/notion.js";
 
 describe("notion importer", () => {
   it("extracts notion urls and ids from tool payloads", () => {
@@ -40,5 +40,24 @@ describe("notion importer", () => {
     expect(plan[0]?.title).toBe("Design Notes");
     expect(plan[0]?.bodies).toHaveLength(2);
     expect(plan[0]?.sourceRefs).toEqual(["ref-a", "ref-b"]);
+  });
+
+  it("extracts title and markdown from notion JSON payloads", () => {
+    const parsed = extractParsedNotionContent({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            title: "Customers",
+            url: "https://www.notion.so/9cb302996a6d43598252a50ccbd9a9cb",
+            text: "Here is the result of \"view\"\n<content>\n<page url=\"{{https://www.notion.so/a}}\">Alpha</page>\n<empty-block/>\n# Heading\nBody text\n</content>"
+          })
+        }
+      ]
+    });
+
+    expect(parsed.title).toBe("Customers");
+    expect(parsed.sourceUrl).toBe("https://www.notion.so/9cb302996a6d43598252a50ccbd9a9cb");
+    expect(parsed.markdownBlocks).toEqual(["[Alpha](https://www.notion.so/a)\n\n# Heading\nBody text"]);
   });
 });

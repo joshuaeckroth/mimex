@@ -62,6 +62,16 @@ type McpCallResult = {
   content?: unknown;
   structuredContent?: unknown;
 };
+type ParsedNotionPayload = {
+  title: string | null;
+  sourceUrl: string | null;
+  markdown: string;
+};
+type ParsedNotionContent = {
+  title: string | null;
+  sourceUrl: string | null;
+  markdownBlocks: string[];
+};
 
 const NOTION_URL_RE = /https?:\/\/(?:www\.)?notion\.so\/[^\s<>"')\]]+/gi;
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
@@ -166,6 +176,110 @@ function toolInputProperties(tool: McpTool): string[] {
 
 function maybeString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function unwrapNotionContentBlock(text: string): string {
+  const content = text.match(/<content>\s*([\s\S]*?)\s*<\/content>/i)?.[1];
+  return (content ?? text).replace(/\r\n?/g, "\n");
+}
+
+function normalizeNotionPageLinks(markdown: string): string {
+  return markdown.replace(/<page\s+url="([^"]+)">([\s\S]*?)<\/page>/gi, (_all, rawUrl: string, rawLabel: string) => {
+    const url = rawUrl.replace(/\{\{(https?:\/\/[^}\s]+)\}\}/gi, "$1").trim();
+    const label = rawLabel.replace(/\s+/g, " ").trim() || url;
+    return `[${label}](${url})`;
+  });
+}
+
+function normalizeNotionMarkdown(raw: string): string {
+  const unwrapped = unwrapNotionContentBlock(raw)
+    .replace(/\{\{(https?:\/\/[^}\s]+)\}\}/gi, "$1")
+    .replace(/<empty-block\s*\/>/gi, "")
+    .trim();
+  return normalizeNotionPageLinks(unwrapped).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function parseNotionPayloadObject(value: JsonObject): ParsedNotionPayload | null {
+  const title = maybeString(value.title);
+  const sourceUrl = maybeString(value.url);
+  const rawText = maybeString(value.text) ?? maybeString(value.markdown) ?? maybeString(value.content);
+  if (!rawText) {
+    return null;
+  }
+
+  const markdown = normalizeNotionMarkdown(rawText);
+  if (!markdown) {
+    return null;
+  }
+
+  return {
+    title,
+    sourceUrl,
+    markdown
+  };
+}
+
+function parseNotionPayloadFromUnknown(value: unknown): ParsedNotionPayload | null {
+  const rec = asRecord(value);
+  if (rec) {
+    return parseNotionPayloadObject(rec);
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const parsedRec = asRecord(parsed);
+    if (!parsedRec) {
+      return null;
+    }
+    return parseNotionPayloadObject(parsedRec);
+  } catch {
+    return null;
+  }
+}
+
+export function extractParsedNotionContent(result: McpCallResult): ParsedNotionContent {
+  const markdownBlocks: string[] = [];
+  let title: string | null = null;
+  let sourceUrl: string | null = null;
+
+  const addParsed = (parsed: ParsedNotionPayload | null): void => {
+    if (!parsed) {
+      return;
+    }
+    if (!title && parsed.title) {
+      title = cleanTitle(parsed.title);
+    }
+    if (!sourceUrl && parsed.sourceUrl) {
+      sourceUrl = parsed.sourceUrl;
+    }
+    markdownBlocks.push(parsed.markdown);
+  };
+
+  addParsed(parseNotionPayloadFromUnknown(result.structuredContent));
+
+  const content = Array.isArray(result.content) ? result.content : [];
+  for (const block of content) {
+    const rec = asRecord(block);
+    if (!rec || rec.type !== "text" || typeof rec.text !== "string") {
+      continue;
+    }
+    addParsed(parseNotionPayloadFromUnknown(rec.text));
+  }
+
+  return {
+    title,
+    sourceUrl,
+    markdownBlocks
+  };
 }
 
 function guessTitleFromFetch(result: McpCallResult, fallbackRef: string): string {
@@ -545,7 +659,8 @@ export async function importFromNotionMcp(core: MimexCore, options: NotionImport
           arguments: buildFetchArgs(fetchTool, ref)
         })) as McpCallResult;
 
-        const textBlocks = extractTextBlocks(fetchResult);
+        const parsedNotion = extractParsedNotionContent(fetchResult);
+        const textBlocks = parsedNotion.markdownBlocks.length > 0 ? parsedNotion.markdownBlocks : extractTextBlocks(fetchResult);
         const markdown = textBlocks.join("\n\n").trim();
         if (!markdown) {
           summary.errors.push(`empty fetch content for ${ref}`);
@@ -553,9 +668,9 @@ export async function importFromNotionMcp(core: MimexCore, options: NotionImport
         }
 
         const discoveredRefs = extractNotionReferencesFromToolResult(fetchResult);
-        const sourceUrl = discoveredRefs.find(isLikelyUrl) ?? (isLikelyUrl(ref) ? ref : null);
+        const sourceUrl = parsedNotion.sourceUrl ?? discoveredRefs.find(isLikelyUrl) ?? (isLikelyUrl(ref) ? ref : null);
         drafts.push({
-          title: guessTitleFromFetch(fetchResult, sourceUrl ?? ref),
+          title: parsedNotion.title ?? guessTitleFromFetch(fetchResult, sourceUrl ?? ref),
           markdown,
           sourceRef: ref,
           sourceUrl
