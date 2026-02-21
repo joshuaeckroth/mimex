@@ -10,6 +10,7 @@ import type {
   NoteBody,
   NoteBodyMeta,
   NoteMeta,
+  NoteQueryOptions,
   NoteWithBodies,
   SearchResult,
   SoftLinkEvent,
@@ -44,7 +45,7 @@ export class MimexCore {
     await this.ensureGitRepo();
   }
 
-  async listNotes(): Promise<NoteMeta[]> {
+  async listNotes(options: NoteQueryOptions = {}): Promise<NoteMeta[]> {
     await this.init();
     const noteDirs = await this.getNoteDirectories();
     const notes: NoteMeta[] = [];
@@ -56,15 +57,22 @@ export class MimexCore {
       }
     }
 
-    return notes.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const includeArchived = options.includeArchived ?? false;
+
+    return notes
+      .filter((note) => includeArchived || !isArchived(note))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async createNote(input: CreateNoteInput): Promise<NoteWithBodies> {
     await this.init();
     const title = this.validateTitle(input.title);
-    const existing = await this.findNoteByTitle(title);
+    const existing = await this.findNoteByTitle(title, { includeArchived: true });
 
     if (existing) {
+      if (isArchived(existing)) {
+        await this.restoreNote(existing.id);
+      }
       if (input.markdown && input.markdown.trim().length > 0) {
         await this.addBody({
           noteRef: existing.id,
@@ -88,6 +96,7 @@ export class MimexCore {
       aliases: this.normalizeAliases(input.aliases ?? []),
       createdAt: now,
       updatedAt: now,
+      archivedAt: null,
       bodies: []
     };
 
@@ -104,10 +113,13 @@ export class MimexCore {
 
   async addBody(input: AddBodyInput): Promise<NoteWithBodies> {
     await this.init();
-    const note = await this.resolveNoteRef(input.noteRef);
+    const note = await this.resolveNoteRef(input.noteRef, { includeArchived: true });
 
     if (!note) {
       throw new Error(`note not found: ${input.noteRef}`);
+    }
+    if (isArchived(note)) {
+      throw new Error(`note is archived: ${note.title}`);
     }
 
     const now = new Date().toISOString();
@@ -123,9 +135,45 @@ export class MimexCore {
     return this.getNote(note.id);
   }
 
+  async archiveNote(noteRef: string): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${noteRef}`);
+    }
+    if (isArchived(note)) {
+      return this.getNote(note.id);
+    }
+
+    note.archivedAt = new Date().toISOString();
+    note.updatedAt = note.archivedAt;
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: archive ${note.title}`);
+    return this.getNote(note.id);
+  }
+
+  async restoreNote(noteRef: string): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${noteRef}`);
+    }
+    if (!isArchived(note)) {
+      return this.getNote(note.id);
+    }
+
+    note.archivedAt = null;
+    note.updatedAt = new Date().toISOString();
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: restore ${note.title}`);
+    return this.getNote(note.id);
+  }
+
   async getNote(noteRef: string): Promise<NoteWithBodies> {
     await this.init();
-    const note = await this.resolveNoteRef(noteRef);
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
 
     if (!note) {
       throw new Error(`note not found: ${noteRef}`);
@@ -141,7 +189,7 @@ export class MimexCore {
     return { note, bodies };
   }
 
-  async searchNotes(query: string, limit = 10): Promise<SearchResult[]> {
+  async searchNotes(query: string, limit = 10, options: NoteQueryOptions = {}): Promise<SearchResult[]> {
     await this.init();
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
@@ -149,7 +197,7 @@ export class MimexCore {
     }
 
     const queryTokens = tokenize(normalizedQuery);
-    const notes = await this.listNotes();
+    const notes = await this.listNotes(options);
     const results: SearchResult[] = [];
 
     for (const note of notes) {
@@ -211,13 +259,13 @@ export class MimexCore {
 
   async followLink(sourceRef: string, targetHint: string): Promise<FollowLinkResult> {
     await this.init();
-    const source = await this.resolveNoteRef(sourceRef);
+    const source = await this.resolveNoteRef(sourceRef, { includeArchived: false });
 
     if (!source) {
       throw new Error(`source note not found: ${sourceRef}`);
     }
 
-    const directTarget = await this.resolveNoteRef(targetHint);
+    const directTarget = await this.resolveNoteRef(targetHint, { includeArchived: false });
     if (directTarget) {
       await this.incrementSoftLink(source.id, directTarget.id, "hard");
       return {
@@ -229,7 +277,7 @@ export class MimexCore {
       };
     }
 
-    const candidates = await this.searchNotes(targetHint, 5);
+    const candidates = (await this.searchNotes(targetHint, 5)).filter((candidate) => candidate.noteId !== source.id);
     if (candidates.length === 0) {
       return {
         sourceNoteId: source.id,
@@ -254,7 +302,7 @@ export class MimexCore {
 
   async getTopSoftLinks(noteRef: string, limit = 5): Promise<SoftLinkTarget[]> {
     await this.init();
-    const note = await this.resolveNoteRef(noteRef);
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: false });
     if (!note) {
       throw new Error(`note not found: ${noteRef}`);
     }
@@ -266,7 +314,7 @@ export class MimexCore {
       .sort((a, b) => b.weight - a.weight)
       .slice(0, limit);
 
-    const allNotes = await this.listNotes();
+    const allNotes = await this.listNotes({ includeArchived: true });
     const titleById = new Map(allNotes.map((n) => [n.id, n.title]));
 
     return entries.map((entry) => ({
@@ -320,8 +368,8 @@ export class MimexCore {
     return out;
   }
 
-  private async findNoteByTitle(title: string): Promise<NoteMeta | null> {
-    const notes = await this.listNotes();
+  private async findNoteByTitle(title: string, options: NoteQueryOptions = {}): Promise<NoteMeta | null> {
+    const notes = await this.listNotes(options);
     const wanted = normalizeTitle(title);
 
     for (const note of notes) {
@@ -336,18 +384,18 @@ export class MimexCore {
     return null;
   }
 
-  private async resolveNoteRef(noteRef: string): Promise<NoteMeta | null> {
+  private async resolveNoteRef(noteRef: string, options: NoteQueryOptions = {}): Promise<NoteMeta | null> {
     const trimmed = noteRef.trim();
     if (!trimmed) {
       return null;
     }
 
     const byId = await this.readNoteMeta(trimmed);
-    if (byId) {
+    if (byId && ((options.includeArchived ?? false) || !isArchived(byId))) {
       return byId;
     }
 
-    return this.findNoteByTitle(trimmed);
+    return this.findNoteByTitle(trimmed, options);
   }
 
   private async createUniqueNoteId(title: string): Promise<string> {
@@ -381,6 +429,7 @@ export class MimexCore {
       const parsed = JSON.parse(raw) as NoteMeta;
       parsed.aliases ??= [];
       parsed.bodies ??= [];
+      parsed.archivedAt ??= null;
       return parsed;
     } catch {
       return null;
@@ -504,6 +553,10 @@ function tokenize(input: string): string[] {
 function slugify(input: string): string {
   const value = normalizeTitle(input).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return value || randomUUID().slice(0, 8);
+}
+
+function isArchived(note: NoteMeta): boolean {
+  return Boolean(note.archivedAt);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

@@ -11,6 +11,7 @@ export interface NoteMeta {
   aliases: string[];
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
   bodies: NoteBodyMeta[];
 }
 
@@ -71,4 +72,8 @@ export interface AddBodyInput {
   noteRef: string;
   markdown: string;
   label?: string;
+}
+
+export interface NoteQueryOptions {
+  includeArchived?: boolean;
 }

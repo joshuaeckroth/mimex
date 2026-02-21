@@ -41,6 +41,9 @@ importers:
       '@mimex/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@mimex/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       commander:
         specifier: ^13.1.0
         version: 13.1.0

@@ -54,11 +54,26 @@ const followLinkSchema = z.object({
 
 const app = Fastify({ logger: true });
 
+function parseIncludeArchived(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes";
+  }
+  return false;
+}
+
 app.get("/healthz", async () => ({ ok: true, ts: new Date().toISOString() }));
 
 app.get("/api/notes", async (request, reply) => {
   const core = await getCore(request.headers["x-user-id"] as string | undefined);
-  return core.listNotes();
+  const query = z.object({ includeArchived: z.any().optional() }).safeParse(request.query);
+  if (!query.success) {
+    return reply.code(400).send({ error: query.error.flatten() });
+  }
+  return core.listNotes({ includeArchived: parseIncludeArchived(query.data.includeArchived) });
 });
 
 app.post("/api/notes", async (request, reply) => {
@@ -104,14 +119,44 @@ app.post("/api/notes/:noteRef/bodies", async (request, reply) => {
 app.get("/api/search", async (request, reply) => {
   const core = await getCore(request.headers["x-user-id"] as string | undefined);
   const query = z
-    .object({ q: z.string().min(1), limit: z.coerce.number().int().positive().max(50).optional() })
+    .object({
+      q: z.string().min(1),
+      limit: z.coerce.number().int().positive().max(50).optional(),
+      includeArchived: z.any().optional()
+    })
     .safeParse(request.query);
 
   if (!query.success) {
     return reply.code(400).send({ error: query.error.flatten() });
   }
 
-  return core.searchNotes(query.data.q, query.data.limit ?? 10);
+  return core.searchNotes(query.data.q, query.data.limit ?? 10, {
+    includeArchived: parseIncludeArchived(query.data.includeArchived)
+  });
+});
+
+app.post("/api/notes/:noteRef/archive", async (request, reply) => {
+  const core = await getCore(request.headers["x-user-id"] as string | undefined);
+  const params = z.object({ noteRef: z.string().min(1) }).parse(request.params);
+
+  try {
+    const note = await core.archiveNote(params.noteRef);
+    return reply.code(200).send(note);
+  } catch (error) {
+    return reply.code(404).send({ error: (error as Error).message });
+  }
+});
+
+app.post("/api/notes/:noteRef/restore", async (request, reply) => {
+  const core = await getCore(request.headers["x-user-id"] as string | undefined);
+  const params = z.object({ noteRef: z.string().min(1) }).parse(request.params);
+
+  try {
+    const note = await core.restoreNote(params.noteRef);
+    return reply.code(200).send(note);
+  } catch (error) {
+    return reply.code(404).send({ error: (error as Error).message });
+  }
 });
 
 app.post("/api/follow-link", async (request, reply) => {

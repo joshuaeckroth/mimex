@@ -64,6 +64,43 @@ describe("MimexCore", () => {
     expect(top[0]?.title).toBe("Target");
     expect(top[0]?.weight).toBe(2);
   });
+
+  it("archives notes instead of deleting and hides them by default", async () => {
+    const core = await newCore();
+    await core.createNote({ title: "To Archive", markdown: "body" });
+    await core.createNote({ title: "Active", markdown: "body" });
+    await core.createNote({ title: "Source", markdown: "[[To Archive]]" });
+
+    const archived = await core.archiveNote("To Archive");
+    expect(archived.note.archivedAt).toBeTruthy();
+
+    const listed = await core.listNotes();
+    expect(listed.map((note) => note.title).sort()).toEqual(["Active", "Source"]);
+
+    const listedAll = await core.listNotes({ includeArchived: true });
+    expect(listedAll.map((note) => note.title).sort()).toEqual(["Active", "Source", "To Archive"]);
+
+    const searchDefault = await core.searchNotes("archive", 10);
+    expect(searchDefault.map((row) => row.title)).not.toContain("To Archive");
+
+    const searchAll = await core.searchNotes("archive", 10, { includeArchived: true });
+    expect(searchAll.map((row) => row.title)).toContain("To Archive");
+
+    const follow = await core.followLink("Source", "To Archive");
+    expect(follow.targetNoteId).toBeNull();
+  });
+
+  it("restores archived notes", async () => {
+    const core = await newCore();
+    await core.createNote({ title: "Restore Me", markdown: "body" });
+    await core.archiveNote("Restore Me");
+
+    const restored = await core.restoreNote("Restore Me");
+    expect(restored.note.archivedAt).toBeNull();
+
+    const listed = await core.listNotes();
+    expect(listed.map((note) => note.title)).toContain("Restore Me");
+  });
 });
 
 describe("extractHardLinks", () => {
