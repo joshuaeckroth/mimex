@@ -5,6 +5,7 @@ import { Command } from "commander";
 import { MimexCore } from "@mimex/core";
 import type { FollowLinkResult, NoteMeta, SearchResult } from "@mimex/shared-types";
 import { normalizeKey, parseLimit, readStdinText, resolveMarkdownInput } from "./input.js";
+import { renderCompletionScript, SUPPORTED_SHELLS } from "./completion.js";
 import {
   porcelainFollowResult,
   porcelainHardLinks,
@@ -319,6 +320,15 @@ program
       const result = await core.followLink(source, target);
       printOutput(result, renderFollowResult(result), porcelainFollowResult(result));
     });
+  });
+
+program
+  .command("completion")
+  .description("print shell completion script")
+  .argument("<shell>", `shell (${SUPPORTED_SHELLS.join(", ")})`)
+  .action((shell) => {
+    const script = renderCompletionScript(shell);
+    process.stdout.write(script);
   });
 
 program
