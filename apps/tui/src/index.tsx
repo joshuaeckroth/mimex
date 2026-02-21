@@ -65,6 +65,11 @@ interface ThemePalette {
   bodySelectedBg: string;
   borderFocused: string;
   borderBlurred: string;
+  mdHeadingFg: string;
+  mdQuoteFg: string;
+  mdCodeFg: string;
+  mdRuleFg: string;
+  mdMetaFg: string;
 }
 
 const defaultWorkspace = process.env.MIMEX_WORKSPACE_PATH ?? path.resolve(process.cwd(), "data/workspaces/local");
@@ -89,7 +94,12 @@ const THEMES: Record<ThemeName, ThemePalette> = {
     bodySelectedFg: "black",
     bodySelectedBg: "white",
     borderFocused: "white",
-    borderBlurred: "gray"
+    borderBlurred: "gray",
+    mdHeadingFg: "cyan",
+    mdQuoteFg: "magenta",
+    mdCodeFg: "yellow",
+    mdRuleFg: "gray",
+    mdMetaFg: "green"
   },
   light: {
     headerBg: "white",
@@ -105,7 +115,12 @@ const THEMES: Record<ThemeName, ThemePalette> = {
     bodySelectedFg: "white",
     bodySelectedBg: "black",
     borderFocused: "black",
-    borderBlurred: "gray"
+    borderBlurred: "gray",
+    mdHeadingFg: "blue",
+    mdQuoteFg: "magenta",
+    mdCodeFg: "green",
+    mdRuleFg: "gray",
+    mdMetaFg: "black"
   }
 };
 
@@ -214,6 +229,130 @@ function wrapToWidth(input: string, width: number): string[] {
   return out;
 }
 
+function escapeBlessedTags(input: string): string {
+  return input.replace(/\{/g, "\\{").replace(/\}/g, "\\}");
+}
+
+function colorizeLine(input: string, fg: string, bold = false): string {
+  if (bold) {
+    return `{bold}{${fg}-fg}${input}{/${fg}-fg}{/bold}`;
+  }
+  return `{${fg}-fg}${input}{/${fg}-fg}`;
+}
+
+function formatInlineMarkdown(input: string): string {
+  return escapeBlessedTags(input)
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_all, alt: string, url: string) => `image: ${alt || "untitled"} <${url}>`)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_all, label: string, url: string) => `${label} <${url}>`);
+}
+
+function pushWrappedWithPrefix(lines: string[], prefix: string, text: string, width: number): void {
+  const effectiveWidth = Math.max(8, width - prefix.length);
+  const wrapped = wrapToWidth(text, effectiveWidth);
+  for (const [index, chunk] of wrapped.entries()) {
+    lines.push(`${index === 0 ? prefix : " ".repeat(prefix.length)}${chunk || " "}`);
+  }
+}
+
+function pushWrappedStyled(lines: string[], prefix: string, text: string, width: number, fg?: string, bold = false): void {
+  const start = lines.length;
+  pushWrappedWithPrefix(lines, prefix, text, width);
+  if (!fg) {
+    return;
+  }
+  for (let idx = start; idx < lines.length; idx += 1) {
+    lines[idx] = colorizeLine(lines[idx] ?? "", fg, bold);
+  }
+}
+
+function renderMarkdownForTui(markdown: string, width: number, theme: ThemePalette): string[] {
+  const lines: string[] = [];
+  let inCodeBlock = false;
+  const maxRule = Math.max(8, Math.min(64, width - 2));
+
+  for (const rawLine of markdown.replace(/\r\n/g, "\n").split("\n")) {
+    const line = rawLine.replace(/\t/g, "    ");
+    const trimmed = line.trim();
+    const fenceMatch = trimmed.match(/^(```|~~~)\s*([^`~\s]+)?\s*$/);
+
+    if (fenceMatch) {
+      if (!inCodeBlock) {
+        const lang = fenceMatch[2] ? ` ${fenceMatch[2]}` : "";
+        lines.push(colorizeLine(`  [code${lang}]`, theme.mdCodeFg, true));
+      } else {
+        lines.push(colorizeLine("  [/code]", theme.mdCodeFg, true));
+      }
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+
+    if (trimmed.length === 0) {
+      lines.push("");
+      continue;
+    }
+
+    if (inCodeBlock) {
+      pushWrappedStyled(lines, "    ", formatInlineMarkdown(line), width, theme.mdCodeFg);
+      continue;
+    }
+
+    const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      const headingText = formatInlineMarkdown(heading[2].trim());
+      if (lines.length > 0 && lines[lines.length - 1] !== "") {
+        lines.push("");
+      }
+
+      if (level <= 2) {
+        pushWrappedStyled(lines, "  ", headingText, width, theme.mdHeadingFg, true);
+        lines.push(colorizeLine(`  ${(level === 1 ? "=" : "-").repeat(maxRule)}`.slice(0, width), theme.mdHeadingFg));
+        lines.push("");
+      } else {
+        pushWrappedStyled(lines, `  ${"#".repeat(level)} `, headingText, width, theme.mdHeadingFg, true);
+      }
+      continue;
+    }
+
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      lines.push(colorizeLine(`  ${"-".repeat(maxRule)}`, theme.mdRuleFg));
+      continue;
+    }
+
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      pushWrappedStyled(lines, "  | ", formatInlineMarkdown(quote[1].trim()), width, theme.mdQuoteFg);
+      continue;
+    }
+
+    const task = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.+)$/);
+    if (task) {
+      const indent = "  ".repeat(Math.floor(task[1].length / 2));
+      const mark = task[2].toLowerCase() === "x" ? "[x]" : "[ ]";
+      pushWrappedStyled(lines, `  ${indent}- ${mark} `, formatInlineMarkdown(task[3].trim()), width, theme.mdMetaFg);
+      continue;
+    }
+
+    const bullet = line.match(/^(\s*)[-*+]\s+(.+)$/);
+    if (bullet) {
+      const indent = "  ".repeat(Math.floor(bullet[1].length / 2));
+      pushWrappedStyled(lines, `  ${indent}- `, formatInlineMarkdown(bullet[2].trim()), width, theme.mdMetaFg);
+      continue;
+    }
+
+    const ordered = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+    if (ordered) {
+      const indent = "  ".repeat(Math.floor(ordered[1].length / 2));
+      pushWrappedStyled(lines, `  ${indent}${ordered[2]}. `, formatInlineMarkdown(ordered[3].trim()), width, theme.mdMetaFg);
+      continue;
+    }
+
+    pushWrappedWithPrefix(lines, "  ", formatInlineMarkdown(line), width);
+  }
+
+  return lines;
+}
+
 function bodyIndexForLine(bodyStarts: number[], line: number): number {
   if (bodyStarts.length === 0) {
     return 0;
@@ -231,7 +370,7 @@ function bodyIndexForLine(bodyStarts: number[], line: number): number {
   return selected;
 }
 
-function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): BodyRender {
+function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme: ThemePalette): BodyRender {
   const { openedNote, activeBodyIndex, hardLinks, softLinks } = details;
 
   if (!openedNote) {
@@ -244,8 +383,8 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): Body
   const lines: string[] = [];
   const bodyStarts: number[] = [];
 
-  lines.push(openedNote.note.title);
-  lines.push(`Status: ${noteStatus(openedNote.note)} | Bodies: ${openedNote.bodies.length}`);
+  lines.push(colorizeLine(escapeBlessedTags(openedNote.note.title), theme.mdHeadingFg, true));
+  lines.push(colorizeLine(`Status: ${noteStatus(openedNote.note)} | Bodies: ${openedNote.bodies.length}`, theme.mdMetaFg));
   lines.push("");
 
   if (openedNote.bodies.length === 0) {
@@ -255,17 +394,16 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): Body
   for (const [index, body] of openedNote.bodies.entries()) {
     bodyStarts.push(lines.length);
     const prefix = index === activeBodyIndex ? ">" : " ";
-    lines.push(`${prefix} [${index + 1}/${openedNote.bodies.length}] ${body.label} (${body.id}) updated ${body.updatedAt}`);
-
-    for (const rawLine of body.markdown.replace(/\r\n/g, "\n").split("\n")) {
-      const wrapped = wrapToWidth(rawLine, Math.max(8, bodyTextWidth - 2));
-      for (const chunk of wrapped) {
-        lines.push(`  ${chunk || " "}`);
-      }
-    }
+    lines.push(
+      colorizeLine(
+        `${prefix} [${index + 1}/${openedNote.bodies.length}] ${escapeBlessedTags(body.label)} (${body.id}) updated ${body.updatedAt}`,
+        theme.mdMetaFg
+      )
+    );
+    lines.push(...renderMarkdownForTui(body.markdown, Math.max(20, bodyTextWidth - 2), theme));
 
     if (index < openedNote.bodies.length - 1) {
-      lines.push("----------------------------------------------------------------");
+      lines.push(colorizeLine("----------------------------------------------------------------", theme.mdRuleFg));
     }
   }
 
@@ -274,7 +412,7 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): Body
   const hardLinksSummary =
     hardLinks.length === 0 ? "Hard links: 0" : `Hard links (${hardLinks.length}): ${hardLinks.slice(0, 8).map((link) => link.raw).join(", ")}`;
   for (const wrapped of wrapToWidth(hardLinksSummary, bodyTextWidth)) {
-    lines.push(wrapped);
+    lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
   }
 
   const softSummary =
@@ -285,7 +423,7 @@ function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number): Body
           .map((link) => `${link.title} (${link.weight})`)
           .join(", ")}`;
   for (const wrapped of wrapToWidth(softSummary, bodyTextWidth)) {
-    lines.push(wrapped);
+    lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
   }
 
   return { lines, bodyStarts };
@@ -372,7 +510,7 @@ function main(): void {
     mouse: true,
     keys: false,
     vi: false,
-    tags: false,
+    tags: true,
     scrollable: true,
     alwaysScroll: true,
     style: {
@@ -924,7 +1062,7 @@ function main(): void {
     }
 
     const bodyTextWidth = Math.max(20, bodyWidth - 4);
-    const bodyRender = buildBodyRender(state.details, bodyTextWidth);
+    const bodyRender = buildBodyRender(state.details, bodyTextWidth, theme);
     lastBodyRender = bodyRender;
 
     const bodyViewport = Math.max(1, contentHeight - 2);
