@@ -11,6 +11,135 @@ Ship a production-usable v1 of Mimex with:
 - Git-backed storage with offline-first sync + conflict preservation
 - API, MCP, Web UI, TUI, and CLI clients
 
+## Detailed product goals
+
+- Knowledge graph first:
+  - Notes should feel like a traversable knowledge network, not a flat document list.
+  - Every user action that reveals note relationships should improve navigation quality.
+- Fast authoring and retrieval:
+  - Creating a note/body should be low-friction and always available offline.
+  - Finding an intended note from ambiguous text should be reliable via search fallback.
+- Durable local truth:
+  - Local workspace remains the source of truth for editing and browsing.
+  - Sync should never silently drop user content.
+- Predictable conflict behavior:
+  - Merge conflicts remain explicit in markdown text for user resolution.
+  - App should identify conflicting notes and guide users to resolve them quickly.
+- Private by default:
+  - Each user workspace is isolated at storage and API layers.
+  - Cross-user data visibility is impossible without explicit future sharing features.
+- Multi-surface consistency:
+  - Web, CLI, TUI, and MCP must use shared domain logic so link behavior is identical.
+
+## Workflow and dataflow
+
+### Primary entities
+
+- `Note`:
+  - Canonical title, aliases, metadata.
+  - Owns one or more `Body` entries.
+- `Body`:
+  - Markdown document with parsed hard links.
+  - Versioned in Git.
+- `HardLink`:
+  - Explicit markdown link targeting another note title/alias.
+- `SoftLinkEvent`:
+  - Immutable event emitted when user moves from source note to target note.
+- `SoftLinkEdge`:
+  - Aggregated weighted edge derived from events.
+
+### Create/edit flow
+
+1. User creates or edits note/body in any client.
+2. Client sends command to core via API/CLI/TUI/MCP adapter.
+3. Core writes markdown + note metadata to workspace files.
+4. Core updates local SQLite derived indexes (title/body/search/link index).
+5. Auto-commit worker batches changes into Git commits.
+6. UI reflects saved state immediately from local store.
+
+### Read/link-follow flow
+
+1. User opens a note body.
+2. Renderer parses hard links in markdown.
+3. For each link activation:
+   - Try exact/normalized title + alias resolution.
+   - If unresolved, tokenize link text and run FTS search.
+4. User picks destination note from resolved target or search suggestions.
+5. Core records traversal event (`src`, `dst`, `reason`, `delta`, `ts`).
+6. Soft-link aggregation updates top related notes for source note.
+
+### Sync/merge flow
+
+1. Background sync loop runs `fetch -> merge -> push` on user workspace remote.
+2. Non-conflicting changes merge normally.
+3. Conflicting note bodies retain Git conflict markers in markdown files.
+4. System marks note as conflict-present for UX surfacing.
+5. Derived indexes rebuild/update after merge to keep search/link graph current.
+
+### Request path by interface
+
+- Web:
+  - Browser -> API (`/api`) -> core -> filesystem/git/index.
+- CLI/TUI:
+  - Local command -> API or direct core process -> filesystem/git/index.
+- MCP:
+  - MCP tool call (`/mcp` or stdio) -> MCP adapter -> core -> filesystem/git/index.
+
+## UX specification
+
+### Information architecture
+
+- Main views:
+  - Home/search
+  - Note detail
+  - Conflict inbox
+  - Recent activity
+- Note detail regions:
+  - Title + aliases
+  - Body tabs/switcher
+  - Markdown editor/viewer
+  - Hard-link suggestions (when unresolved)
+  - Top soft links panel
+
+### Authoring UX
+
+- Create note from title-first input.
+- Add multiple bodies to same title with labels (for distinct writeups).
+- Markdown preview toggle and keyboard shortcuts for quick linking.
+- Inline link state badges:
+  - resolved hard link
+  - unresolved link with suggestion action
+
+### Navigation UX
+
+- Clicking resolved hard link moves directly to destination note.
+- Clicking unresolved link opens ranked candidate picker from search fallback.
+- Every successful transition updates soft-link graph in background.
+- Top soft links show:
+  - target title
+  - current weight
+  - reason summary (hard/search mix)
+
+### Conflict UX
+
+- Dedicated conflict list sorted by most recently synced conflict.
+- Note page warning banner when current body contains conflict markers.
+- Side-by-side helper:
+  - current merged text with markers
+  - optional clean base/remote snapshots when available
+- Resolve action writes cleaned markdown and commits resolution.
+
+### Cross-surface UX parity
+
+- Same commands and semantics across web/CLI/TUI:
+  - create note/body
+  - follow link
+  - unresolved link candidate pick
+  - view top soft links
+  - view/resolve conflicts
+- CLI and TUI prioritize keyboard-driven flows with minimal prompts.
+- Web emphasizes discoverability and visual relationship cues.
+
 ## Milestones
 
 ## Milestone 0: Monorepo bootstrap (1 week)
