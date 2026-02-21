@@ -51,6 +51,18 @@ importers:
         specifier: ^13.1.0
         version: 13.1.0
 
+  apps/mcp:
+    dependencies:
+      '@mimex/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.26.0
+        version: 1.26.0(zod@3.25.76)
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+
   apps/tui:
     dependencies:
       '@mimex/core':
