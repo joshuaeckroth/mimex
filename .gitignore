@@ -8,5 +8,12 @@ infra/terraform/override.tf.json
 infra/terraform/*_override.tf
 infra/terraform/*_override.tf.json
 
+# Node / build
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+coverage/
+
 # Local deploy/runtime artifacts
 *.tgz
