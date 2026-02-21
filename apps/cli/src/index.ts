@@ -6,6 +6,7 @@ import { MimexCore } from "@mimex/core";
 import type { FollowLinkResult, NoteMeta, SearchResult } from "@mimex/shared-types";
 import { normalizeKey, parseLimit, readStdinText, resolveMarkdownInput } from "./input.js";
 import { renderCompletionScript, SUPPORTED_SHELLS } from "./completion.js";
+import { importFromNotionMcp } from "./importers/notion.js";
 import {
   porcelainFollowResult,
   porcelainHardLinks,
@@ -32,6 +33,17 @@ interface GlobalOptions {
   workspace: string;
   json?: boolean;
   porcelain?: boolean;
+}
+
+interface ImportNotionOptions {
+  query: string;
+  limit: string;
+  dryRun?: boolean;
+  mcpCommand: string;
+  mcpArg?: string[];
+  strategy: "heuristic" | "llm";
+  plannerCommand?: string;
+  plannerTimeoutMs: string;
 }
 
 function createCore(workspace: string): MimexCore {
@@ -319,6 +331,84 @@ program
     await withCore(async (core) => {
       const result = await core.followLink(source, target);
       printOutput(result, renderFollowResult(result), porcelainFollowResult(result));
+    });
+  });
+
+program
+  .command("import:notion")
+  .description("import notes from Notion via MCP")
+  .requiredOption("-q, --query <query>", "search query to find pages in Notion")
+  .option("-l, --limit <number>", "max fetched references", "25")
+  .option("--dry-run", "plan import without writing notes")
+  .option("--mcp-command <command>", "MCP bridge command", "npx")
+  .option(
+    "--mcp-arg <arg...>",
+    "MCP bridge args (default: -y mcp-remote https://mcp.notion.com/mcp)",
+    ["-y", "mcp-remote", "https://mcp.notion.com/mcp"]
+  )
+  .option("--strategy <strategy>", "note planning strategy: heuristic|llm", "heuristic")
+  .option("--planner-command <command>", "shell command for LLM-based planner (reads JSON stdin, writes JSON stdout)")
+  .option("--planner-timeout-ms <ms>", "LLM planner timeout in ms", "60000")
+  .action(async (options: ImportNotionOptions) => {
+    await withCore(async (core) => {
+      const strategy = options.strategy === "llm" ? "llm" : "heuristic";
+      const summary = await importFromNotionMcp(core, {
+        query: options.query,
+        limit: parseLimit(options.limit, 25),
+        dryRun: Boolean(options.dryRun),
+        mcpCommand: options.mcpCommand,
+        mcpArgs: options.mcpArg && options.mcpArg.length > 0 ? options.mcpArg : ["-y", "mcp-remote", "https://mcp.notion.com/mcp"],
+        strategy,
+        plannerCommand: options.plannerCommand,
+        plannerTimeoutMs: parseLimit(options.plannerTimeoutMs, 60000)
+      });
+
+      const humanLines = [
+        `Notion import (${summary.strategy}) query="${summary.query}"`,
+        `References discovered: ${summary.referencesDiscovered}`,
+        `Fetched documents: ${summary.fetchedDocuments}`,
+        `Planned notes: ${summary.plannedNotes}`,
+        `Created notes: ${summary.createdNotes}`,
+        `Added bodies: ${summary.addedBodies}`,
+        `Skipped duplicate bodies: ${summary.skippedBodies}`
+      ];
+
+      if (summary.notes.length > 0) {
+        humanLines.push("Notes:");
+        for (const note of summary.notes) {
+          humanLines.push(`- ${note.title} | bodies=${note.bodyLabels.length} | refs=${note.sourceRefs.length}`);
+        }
+      }
+
+      if (summary.errors.length > 0) {
+        humanLines.push("Errors:");
+        for (const error of summary.errors) {
+          humanLines.push(`- ${error}`);
+        }
+      }
+
+      const porcelainLines = [
+        [
+          "IMPORT",
+          "notion",
+          summary.strategy,
+          summary.query,
+          summary.referencesDiscovered,
+          summary.fetchedDocuments,
+          summary.plannedNotes,
+          summary.createdNotes,
+          summary.addedBodies,
+          summary.skippedBodies
+        ].join("\t")
+      ];
+      for (const note of summary.notes) {
+        porcelainLines.push(["IMPORT_NOTE", note.title, note.bodyLabels.length, note.sourceRefs.length].join("\t"));
+      }
+      for (const error of summary.errors) {
+        porcelainLines.push(["IMPORT_ERROR", error.replace(/[\t\n\r]+/g, " ").trim()].join("\t"));
+      }
+
+      printOutput(summary, humanLines.join("\n"), porcelainLines.join("\n"));
     });
   });
 

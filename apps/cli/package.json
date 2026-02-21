@@ -17,6 +17,7 @@
   "dependencies": {
     "@mimex/core": "workspace:*",
     "@mimex/shared-types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "commander": "^13.1.0"
   }
 }

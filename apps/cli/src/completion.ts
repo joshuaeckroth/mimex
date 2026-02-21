@@ -11,6 +11,7 @@ const COMMANDS = [
   "body:add",
   "search",
   "follow",
+  "import:notion",
   "links:hard",
   "links:resolve",
   "links:follow-hard",
@@ -97,6 +98,7 @@ _mimex_cli_complete() {
       note:list) opts="$opts --all" ;;
       body:add) opts="$opts --markdown -m --markdown-file -f --label -l" ;;
       search) opts="$opts --limit -l --all" ;;
+      import:notion) opts="$opts --query -q --limit -l --dry-run --mcp-command --mcp-arg --strategy --planner-command --planner-timeout-ms" ;;
       links:resolve|links:follow-hard|links:soft) opts="$opts --limit -l" ;;
       completion) opts="$opts" ;;
     esac
@@ -125,6 +127,12 @@ _mimex_cli_complete() {
       if [[ "$arg_index" -eq 2 ]]; then
         local src="\${COMP_WORDS[$((cmd_index + 1))]}"
         COMPREPLY=( $(compgen -W "$(__mimex_cli_note_ids) $(__mimex_cli_hard_links "$src")" -- "$cur") )
+        return 0
+      fi
+      ;;
+    import:notion)
+      if [[ "$prev" == "--strategy" ]]; then
+        COMPREPLY=( $(compgen -W "heuristic llm" -- "$cur") )
         return 0
       fi
       ;;
@@ -172,6 +180,14 @@ complete -c mimex-cli -n '__fish_seen_subcommand_from body:add' -l markdown-file
 complete -c mimex-cli -n '__fish_seen_subcommand_from body:add' -l label -s l -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from search' -l limit -s l -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from search' -l all
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l query -s q -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l limit -s l -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l dry-run
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l mcp-command -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l mcp-arg -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l strategy -a 'heuristic llm'
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l planner-command -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l planner-timeout-ms -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from links:resolve links:follow-hard links:soft' -l limit -s l -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 `;

@@ -8,6 +8,7 @@ describe("completion scripts", () => {
     expect(script).toContain("__mimex_cli_command_index");
     expect(script).toContain("complete -F _mimex_cli_complete mimex-cli");
     expect(script).toContain("note:archive");
+    expect(script).toContain("import:notion");
   });
 
   it("renders zsh completion", () => {
