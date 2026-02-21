@@ -19,6 +19,12 @@ Dry-run (plan only):
 mimex-cli import:notion --query "engineering wiki" --dry-run
 ```
 
+Dry-run all accessible pages:
+
+```bash
+mimex-cli import:notion --dry-run --limit 500
+```
+
 Run import:
 
 ```bash

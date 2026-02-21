@@ -36,7 +36,7 @@ interface GlobalOptions {
 }
 
 interface ImportNotionOptions {
-  query: string;
+  query?: string;
   limit: string;
   dryRun?: boolean;
   mcpCommand: string;
@@ -337,7 +337,7 @@ program
 program
   .command("import:notion")
   .description("import notes from Notion via MCP")
-  .requiredOption("-q, --query <query>", "search query to find pages in Notion")
+  .option("-q, --query <query>", "search query to find pages in Notion (omit to fetch all accessible pages)")
   .option("-l, --limit <number>", "max fetched references", "25")
   .option("--dry-run", "plan import without writing notes")
   .option("--mcp-command <command>", "MCP bridge command", "npx")
@@ -353,7 +353,7 @@ program
     await withCore(async (core) => {
       const strategy = options.strategy === "llm" ? "llm" : "heuristic";
       const summary = await importFromNotionMcp(core, {
-        query: options.query,
+        query: options.query?.trim(),
         limit: parseLimit(options.limit, 25),
         dryRun: Boolean(options.dryRun),
         mcpCommand: options.mcpCommand,
@@ -364,7 +364,7 @@ program
       });
 
       const humanLines = [
-        `Notion import (${summary.strategy}) query="${summary.query}"`,
+        `Notion import (${summary.strategy}) query="${summary.query || "(all pages)"}"`,
         `References discovered: ${summary.referencesDiscovered}`,
         `Fetched documents: ${summary.fetchedDocuments}`,
         `Planned notes: ${summary.plannedNotes}`,

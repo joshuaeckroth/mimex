@@ -58,6 +58,23 @@ describe("notion importer", () => {
 
     expect(parsed.title).toBe("Customers");
     expect(parsed.sourceUrl).toBe("https://www.notion.so/9cb302996a6d43598252a50ccbd9a9cb");
-    expect(parsed.markdownBlocks).toEqual(["[Alpha](https://www.notion.so/a)\n\n# Heading\nBody text"]);
+    expect(parsed.markdownBlocks).toEqual(["[[Alpha]]\n\n# Heading\nBody text"]);
+  });
+
+  it("converts notion internal links to mimex hard links", () => {
+    const parsed = extractParsedNotionContent({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            title: "Roadmap",
+            url: "https://www.notion.so/example-roadmap",
+            text: "<content>\nSee [Foo Bar](https://www.notion.so/foo-bar-1234)\nBaz Qux <https://www.notion.so/baz-qux-5678>\n</content>"
+          })
+        }
+      ]
+    });
+
+    expect(parsed.markdownBlocks).toEqual(["See [[Foo Bar]]\n[[Baz Qux]]"]);
   });
 });

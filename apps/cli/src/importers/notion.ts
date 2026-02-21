@@ -25,7 +25,7 @@ export interface NotionImportDraft {
 }
 
 export interface NotionImportOptions {
-  query: string;
+  query?: string;
   limit: number;
   dryRun: boolean;
   mcpCommand: string;
@@ -191,12 +191,42 @@ function normalizeNotionPageLinks(markdown: string): string {
   });
 }
 
+function sanitizeMimexLinkTarget(input: string): string {
+  return input.replace(/\s+/g, " ").trim().replace(/^\[+/, "").replace(/\]+$/, "");
+}
+
+function convertNotionInternalLinksToMimexLinks(markdown: string): string {
+  let output = markdown.replace(
+    /\[([^\]]+)\]\((https?:\/\/(?:www\.)?notion\.so\/[^\s)]+)\)/gi,
+    (all, rawLabel: string, _url: string) => {
+      const label = sanitizeMimexLinkTarget(rawLabel);
+      return label ? `[[${label}]]` : all;
+    }
+  );
+
+  output = output.replace(
+    /(^|[\s(])([^\n<>]+?)\s*<(https?:\/\/(?:www\.)?notion\.so\/[^>\s]+)>/gim,
+    (all, prefix: string, rawLabel: string, _url: string) => {
+      const label = sanitizeMimexLinkTarget(rawLabel);
+      if (!label) {
+        return all;
+      }
+      return `${prefix}[[${label}]]`;
+    }
+  );
+
+  return output;
+}
+
 function normalizeNotionMarkdown(raw: string): string {
   const unwrapped = unwrapNotionContentBlock(raw)
     .replace(/\{\{(https?:\/\/[^}\s]+)\}\}/gi, "$1")
     .replace(/<empty-block\s*\/>/gi, "")
     .trim();
-  return normalizeNotionPageLinks(unwrapped).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return convertNotionInternalLinksToMimexLinks(normalizeNotionPageLinks(unwrapped))
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function parseNotionPayloadObject(value: JsonObject): ParsedNotionPayload | null {
@@ -370,19 +400,28 @@ function chooseTool(tools: McpTool[], preferred: string[], fallbackContains: str
   throw new Error(`required MCP tool not found: ${preferred.join(" or ")}`);
 }
 
-function buildSearchArgs(tool: McpTool, query: string): JsonObject {
+function buildSearchArgs(tool: McpTool, query: string | undefined): JsonObject {
   const properties = new Set(toolInputProperties(tool));
   const args: JsonObject = {};
+  const normalizedQuery = (query ?? "").trim();
+  const queryValue = normalizedQuery || " ";
 
   if (properties.has("query")) {
-    args.query = query;
+    args.query = queryValue;
   } else if (properties.has("q")) {
-    args.q = query;
-  } else {
+    args.q = queryValue;
+  } else if (normalizedQuery) {
     const first = [...properties][0];
     if (first) {
-      args[first] = query;
+      args[first] = normalizedQuery;
     }
+  }
+
+  if (!normalizedQuery && properties.has("filter")) {
+    args.filter = {
+      property: "object",
+      value: "page"
+    };
   }
 
   if (properties.has("query_type")) {
@@ -623,7 +662,7 @@ async function ensureConnectedClient(command: string, args: string[]): Promise<{
 export async function importFromNotionMcp(core: MimexCore, options: NotionImportOptions): Promise<NotionImportSummary> {
   const summary: NotionImportSummary = {
     strategy: options.strategy,
-    query: options.query,
+    query: (options.query ?? "").trim(),
     referencesDiscovered: 0,
     fetchedDocuments: 0,
     plannedNotes: 0,
