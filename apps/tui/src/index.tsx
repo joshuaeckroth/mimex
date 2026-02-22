@@ -116,7 +116,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab pane, j/k + g/G scroll, Ctrl+u/d page, [ ] body, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
+  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 
@@ -250,6 +250,28 @@ function truncateForWidth(input: string, width: number): string {
   return `${input.slice(0, width - 1)}…`;
 }
 
+function findPreferredWrapCut(input: string, width: number): number {
+  const minWordCut = Math.floor(width * 0.5);
+  const spacedCut = input.lastIndexOf(" ", width);
+  if (spacedCut >= minWordCut) {
+    return spacedCut;
+  }
+
+  // For long markdown URLs, prefer breaking after URL separators.
+  const minUrlCut = Math.floor(width * 0.33);
+  const urlWindow = input.slice(0, width + 1);
+  const urlSeparator = /[\/?#&=._:%-]/g;
+  let urlCut = -1;
+  for (const match of urlWindow.matchAll(urlSeparator)) {
+    urlCut = (match.index ?? -1) + 1;
+  }
+  if (urlCut >= minUrlCut) {
+    return urlCut;
+  }
+
+  return Math.max(1, width);
+}
+
 function wrapToWidth(input: string, width: number): string[] {
   const safeWidth = Math.max(8, width);
   const normalized = input.replace(/\t/g, "    ");
@@ -261,10 +283,7 @@ function wrapToWidth(input: string, width: number): string[] {
   let rest = normalized;
 
   while (rest.length > safeWidth) {
-    let cut = rest.lastIndexOf(" ", safeWidth);
-    if (cut < Math.floor(safeWidth * 0.5)) {
-      cut = safeWidth;
-    }
+    const cut = findPreferredWrapCut(rest, safeWidth);
 
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut).trimStart();
@@ -1677,8 +1696,42 @@ function main(): void {
       return;
     }
 
+    if (key.name === "left") {
+      if (state.focusPane !== "notes") {
+        state.focusPane = "notes";
+        renderPaneChromeOnly();
+      }
+      return;
+    }
+
+    if (key.name === "right") {
+      if (state.focusPane !== "bodies") {
+        state.focusPane = "bodies";
+        renderPaneChromeOnly();
+      }
+      return;
+    }
+
     const notesViewport = Math.max(1, (typeof notesList.height === "number" ? notesList.height : 10) - 2);
     const bodyViewport = Math.max(1, lastBodyViewport);
+
+    if (key.name === "pageup" || key.name === "prior") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(-Math.max(1, notesViewport - 1));
+      } else {
+        scrollBodyBy(-Math.max(1, bodyViewport - 1));
+      }
+      return;
+    }
+
+    if (key.name === "pagedown" || key.name === "next") {
+      if (state.focusPane === "notes") {
+        moveSelectedNoteBy(Math.max(1, notesViewport - 1));
+      } else {
+        scrollBodyBy(Math.max(1, bodyViewport - 1));
+      }
+      return;
+    }
 
     if ((key.ctrl && key.name === "d") || ch === "J") {
       if (state.focusPane === "notes") {
