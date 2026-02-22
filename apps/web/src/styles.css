@@ -1,0 +1,281 @@
+:root {
+  --bg: #e9e9e9;
+  --panel: #f6f6f6;
+  --ink: #111;
+  --muted: #5c5c5c;
+  --line: #2f2f2f;
+  --line-soft: #9b9b9b;
+  --active: #d9d9d9;
+  --error: #3d0f0f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Iosevka", "Cascadia Mono", monospace;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 0.75rem;
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  gap: 0.75rem;
+}
+
+.topbar,
+.controls,
+.status-row,
+.pane {
+  border: 2px solid var(--line);
+  background: var(--panel);
+}
+
+.topbar {
+  padding: 0.6rem 0.8rem;
+}
+
+.topbar h1 {
+  margin: 0;
+  letter-spacing: 0.1em;
+  font-size: 1.05rem;
+}
+
+.topbar p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto auto;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  align-items: end;
+}
+
+.controls label {
+  display: grid;
+  gap: 0.28rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.controls input[type="text"],
+.controls input[type="search"] {
+  width: 100%;
+  padding: 0.5rem 0.55rem;
+  border: 2px solid var(--line-soft);
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.controls input:focus {
+  outline: none;
+  border-color: var(--line);
+}
+
+.controls .checkbox {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.85rem;
+}
+
+button {
+  border: 2px solid var(--line);
+  background: #d5d5d5;
+  color: var(--ink);
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  text-transform: lowercase;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #cbcbcb;
+}
+
+button:focus-visible {
+  outline: 2px dashed var(--line);
+  outline-offset: 1px;
+}
+
+.status-row {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.82rem;
+}
+
+.status-row.error {
+  color: var(--error);
+}
+
+.panes {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(16rem, 24rem) minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.pane {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.pane-title {
+  padding: 0.4rem 0.55rem;
+  border-bottom: 2px solid var(--line);
+  background: #dcdcdc;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.09em;
+}
+
+.note-list {
+  overflow: auto;
+}
+
+.note-row {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-left: 4px solid transparent;
+  background: transparent;
+  display: grid;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+}
+
+.note-row:hover {
+  background: #ececec;
+}
+
+.note-row.active {
+  background: var(--active);
+  border-left-color: var(--line);
+}
+
+.note-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.note-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.note-detail {
+  overflow: auto;
+  padding: 0.75rem;
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+}
+
+.note-detail.empty {
+  color: var(--muted);
+}
+
+.detail-head h2 {
+  margin: 0;
+  font-size: 1.12rem;
+  line-height: 1.2;
+}
+
+.detail-subline {
+  margin-top: 0.22rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.body-card {
+  border: 2px solid var(--line-soft);
+  background: #fcfcfc;
+}
+
+.body-label {
+  border-bottom: 1px solid var(--line-soft);
+  background: #ececec;
+  padding: 0.32rem 0.45rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.body-markdown {
+  margin: 0;
+  padding: 0.55rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.33;
+  font-family: inherit;
+  font-size: 0.86rem;
+}
+
+.empty-msg {
+  padding: 0.6rem;
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .panes {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(12rem, 42vh) minmax(18rem, 1fr);
+  }
+
+  .pane-list,
+  .pane-detail {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-shell {
+    padding: 0.5rem;
+    gap: 0.5rem;
+  }
+
+  .topbar,
+  .controls,
+  .status-row,
+  .pane {
+    border-width: 1px;
+  }
+
+  .pane-title {
+    border-bottom-width: 1px;
+  }
+
+  .topbar h1 {
+    font-size: 0.98rem;
+  }
+
+  .note-title {
+    font-size: 0.84rem;
+  }
+
+  .body-markdown {
+    font-size: 0.82rem;
+  }
+}

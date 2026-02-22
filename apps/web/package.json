@@ -1,0 +1,14 @@
+{
+  "name": "@mimex/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "dev": "node ./scripts/server.mjs --root=src --port=5173",
+    "start": "node ./scripts/server.mjs --root=dist --port=4173",
+    "typecheck": "echo 'no typecheck for web yet'",
+    "test": "echo 'no tests for web yet'",
+    "clean": "rm -rf dist"
+  }
+}

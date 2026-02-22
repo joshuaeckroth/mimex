@@ -1,66 +1,75 @@
-# Mimex Tech Stack Decisions
+# Mimex Tech Stack (Slim)
 
 ## Product Surface
 
-- Local-first notes knowledge base with Git-backed storage and automatic commits
-- One note title can have multiple distinct markdown bodies
-- Hard links in markdown with unresolved-link search fallback
-- Soft-link graph based on actual user traversal, with weighted ranking
-- MCP protocol server, Web UI, TUI, and CLI
-- Multi-user with private workspaces
+- Local-first note system backed by plain files and git history.
+- One note title with multiple markdown bodies.
+- Hard-link parsing with search fallback.
+- Soft-link graph built from actual traversal events.
+- Multiple interfaces over shared core logic: API, CLI, TUI, MCP, Web.
 
 ## Chosen Stack
 
-### Core + Backend
+## Core + Backend
 
-- Language/runtime: TypeScript on Node.js 24 LTS
-- Monorepo tooling: `pnpm` + `turbo`
-- Core domain package: `packages/core`
-- Local daemon/API: Fastify (`apps/api`)
-- MCP server: official MCP TypeScript SDK (`apps/mcp`)
-- Git integration: system `git` CLI invoked from core/api
-- Search/index: SQLite + FTS5 for local indexing and unresolved-link lookup
+- Language/runtime: TypeScript on Node.js.
+- Monorepo: `pnpm` + `turbo`.
+- Shared domain layer: `packages/core`.
+- Shared contracts: `packages/shared-types`.
+- HTTP API: Fastify (`apps/api`).
+- MCP integration: official MCP TypeScript SDK over stdio (`apps/mcp`).
+- Persistence: filesystem + git in per-user workspaces.
+- Local caching: metadata cache files under `~/.cache/mimex` (or `$XDG_CACHE_HOME/mimex`).
 
-### Clients
+## Clients
 
-- Web UI: React + Vite + TypeScript (`apps/web`)
-- Terminal UI: Ink + TypeScript (`apps/tui`)
-- CLI: `commander` + TypeScript (`apps/cli`)
+- CLI: `commander` + TypeScript (`apps/cli`).
+- TUI: `neo-blessed` + TypeScript (`apps/tui`).
+- Web: static HTML/CSS/JS (`apps/web`) with minimal Node static/proxy server.
 
-## Deployment Strategy (low-cost)
+## Data Model and Storage
 
-Constraint honored: single TLS host `mimex.dev` (no subdomains).
+- Workspace root per user: `data/workspaces/<userId>/`.
+- Notes:
+  - `notes/<noteId>/note.json`
+  - `notes/<noteId>/bodies/<bodyId>.md`
+- Soft-link store:
+  - `.mimex/softlinks.json`
+- Git repo exists inside each workspace and is auto-committed on writes.
 
-- One EC2 host (`t4g.small` default) with Docker Compose
-- Reverse proxy container (Caddy) handles TLS and path routing
+## Deployment Strategy (Slim Cloud)
+
+Constraint: single TLS host (`mimex.dev`) and low monthly overhead.
+
+- One EC2 host (`t4g.small` default) running Docker Compose.
+- Caddy as reverse proxy + TLS termination.
 - Routes:
-  - `/` -> web
-  - `/api/*` -> backend API
-  - `/mcp/*` -> MCP service
-- Database: local Postgres container on the same host
-- Storage: local encrypted EBS volume (instance root volume)
-- Registry: ECR for web and API images
-- DNS: Route53 root `A` record for `mimex.dev`
+  - `/` -> web container
+  - `/api/*` -> api container
+- Workspace files mounted on host volume into API container.
+- ECR repositories for web and api images.
+- Route53 root `A` record to EC2 Elastic IP.
 
-## Why this strategy now
+## MCP in Deployment
 
-- Removes fixed ALB + NAT costs and keeps monthly baseline low
-- Keeps app/API/MCP behavior unchanged under one root domain
-- Simple operations footprint while traffic is still early-stage
+- Current MCP server is stdio-based (`apps/mcp`), not HTTP-exposed in cloud routing.
+- If remote MCP access is needed later, add an explicit HTTP bridge service and route.
 
-## Repository Layout (recommended)
+## Why This Stack
 
-- `apps/web`
+- Keeps behavior consistent by centralizing logic in `packages/core`.
+- Avoids operational drag from extra stateful services.
+- Maintains low-cost deployment with simple failure domains.
+- Supports fast iteration on UX/performance without schema migrations.
+
+## Repository Layout
+
 - `apps/api`
-- `apps/mcp`
 - `apps/cli`
+- `apps/mcp`
 - `apps/tui`
+- `apps/web`
 - `packages/core`
+- `packages/shared-types`
 - `infra/terraform`
 - `scripts/aws`
-
-## Operational Notes
-
-- User workspaces are private by design, isolated by authenticated user id.
-- Auto-merge strategy keeps conflict markers in markdown text for deferred resolution.
-- Soft-link counters are event-based and append-only, making sync and merge resilient.

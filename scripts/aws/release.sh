@@ -14,15 +14,16 @@ ROOT_VOLUME_SIZE_GB="${ROOT_VOLUME_SIZE_GB:-30}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-}"
 SSH_CIDR="${SSH_CIDR:-0.0.0.0/0}"
 
-API_CONTEXT="${API_CONTEXT:-$ROOT_DIR/apps/api}"
-WEB_CONTEXT="${WEB_CONTEXT:-$ROOT_DIR/apps/web}"
+BUILD_CONTEXT="${BUILD_CONTEXT:-$ROOT_DIR}"
+API_DOCKERFILE="${API_DOCKERFILE:-$ROOT_DIR/apps/api/Dockerfile}"
+WEB_DOCKERFILE="${WEB_DOCKERFILE:-$ROOT_DIR/apps/web/Dockerfile}"
+
 IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
 AUTO_APPROVE="${AUTO_APPROVE:-true}"
 
 SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-}"
 TLS_CERT_PATH="${TLS_CERT_PATH:-}"
 TLS_KEY_PATH="${TLS_KEY_PATH:-}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 
 require_bin() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -40,13 +41,18 @@ if [[ ! -d "$TF_DIR" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$API_CONTEXT/Dockerfile" ]]; then
-  echo "API Dockerfile not found at $API_CONTEXT/Dockerfile" >&2
+if [[ ! -d "$BUILD_CONTEXT" ]]; then
+  echo "Build context not found: $BUILD_CONTEXT" >&2
   exit 1
 fi
 
-if [[ ! -f "$WEB_CONTEXT/Dockerfile" ]]; then
-  echo "Web Dockerfile not found at $WEB_CONTEXT/Dockerfile" >&2
+if [[ ! -f "$API_DOCKERFILE" ]]; then
+  echo "API Dockerfile not found at $API_DOCKERFILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$WEB_DOCKERFILE" ]]; then
+  echo "Web Dockerfile not found at $WEB_DOCKERFILE" >&2
   exit 1
 fi
 
@@ -67,11 +73,6 @@ fi
 
 if [[ -z "$TLS_KEY_PATH" || ! -f "$TLS_KEY_PATH" ]]; then
   echo "Set TLS_KEY_PATH to your private key PEM file" >&2
-  exit 1
-fi
-
-if [[ -z "$POSTGRES_PASSWORD" ]]; then
-  echo "Set POSTGRES_PASSWORD (must stay stable between releases)" >&2
   exit 1
 fi
 
@@ -134,11 +135,11 @@ API_IMAGE="$API_ECR_REPO:$IMAGE_TAG"
 WEB_IMAGE="$WEB_ECR_REPO:$IMAGE_TAG"
 
 echo "==> Build and push API image: $API_IMAGE"
-docker build -t "$API_IMAGE" "$API_CONTEXT"
+docker build -f "$API_DOCKERFILE" -t "$API_IMAGE" "$BUILD_CONTEXT"
 docker push "$API_IMAGE"
 
 echo "==> Build and push Web image: $WEB_IMAGE"
-docker build -t "$WEB_IMAGE" "$WEB_CONTEXT"
+docker build -f "$WEB_DOCKERFILE" -t "$WEB_IMAGE" "$BUILD_CONTEXT"
 docker push "$WEB_IMAGE"
 
 TMP_DIR="$(mktemp -d)"
@@ -154,7 +155,6 @@ cat > "$TMP_DIR/.env" <<ENV
 HOST_NAME=${HOSTED_ZONE_NAME%.}
 API_IMAGE=$API_IMAGE
 WEB_IMAGE=$WEB_IMAGE
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 ENV
 
 cat > "$TMP_DIR/Caddyfile" <<'CADDY'
@@ -165,7 +165,7 @@ http://{$HOST_NAME} {
 https://{$HOST_NAME} {
   tls /certs/fullchain.pem /certs/privkey.pem
 
-  @api path /api/* /mcp/*
+  @api path /api/*
   handle @api {
     reverse_proxy api:8080
   }
@@ -199,8 +199,9 @@ services:
     image: ${WEB_IMAGE}
     restart: unless-stopped
     environment:
+      HOST: "0.0.0.0"
       PORT: "3000"
-      API_BASE_URL: "https://${HOST_NAME}/api"
+      API_ORIGIN: "http://api:8080"
     expose:
       - "3000"
 
@@ -208,33 +209,13 @@ services:
     image: ${API_IMAGE}
     restart: unless-stopped
     environment:
+      HOST: "0.0.0.0"
       PORT: "8080"
-      DATABASE_URL: "postgres://mimex:${POSTGRES_PASSWORD}@postgres:5432/mimex"
       MIMEX_WORKSPACE_ROOT: "/var/lib/mimex/workspaces"
-    depends_on:
-      postgres:
-        condition: service_healthy
     volumes:
       - /opt/mimex/data/workspaces:/var/lib/mimex/workspaces
     expose:
       - "8080"
-
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: "mimex"
-      POSTGRES_USER: "mimex"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mimex -d mimex"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    volumes:
-      - /opt/mimex/data/postgres:/var/lib/postgresql/data
-    expose:
-      - "5432"
 
 volumes:
   caddy_data:
@@ -274,6 +255,6 @@ echo ""
 echo "Release complete"
 echo "Site URL: $SITE_URL"
 echo "API base: $SITE_URL/api"
-echo "MCP endpoint: $SITE_URL/mcp"
+echo "MCP: not exposed in slim cloud deploy (stdio only)"
 echo "Instance IP: $INSTANCE_IP"
 echo "Image tag: $IMAGE_TAG"

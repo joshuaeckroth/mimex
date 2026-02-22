@@ -18,8 +18,8 @@ This stack deploys Mimex on a single low-cost EC2 host and serves everything fro
 - Path routing:
   - `/` -> web container
   - `/api/*` -> API container
-  - `/mcp/*` -> API/MCP container
-- PostgreSQL runs in a local container on the same host for lowest cost
+- Workspace data persists on host storage and is mounted into API container
+- MCP is currently stdio-based (`apps/mcp`) and not exposed via HTTP in this slim deploy
 
 ## Prerequisites
 
@@ -63,4 +63,9 @@ Required env vars for `release.sh`:
 - `SSH_PRIVATE_KEY_PATH`
 - `TLS_CERT_PATH`
 - `TLS_KEY_PATH`
-- `POSTGRES_PASSWORD`
+
+Optional env vars:
+
+- `BUILD_CONTEXT` (defaults to repo root)
+- `API_DOCKERFILE` (defaults to `apps/api/Dockerfile`)
+- `WEB_DOCKERFILE` (defaults to `apps/web/Dockerfile`)

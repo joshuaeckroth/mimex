@@ -1,261 +1,158 @@
-# Mimex Implementation Plan
+# Mimex Implementation Plan (Slim)
 
-## Goal
+## Objective
 
-Ship a production-usable v1 of Mimex with:
+Ship a reliable, low-ops Mimex v1 that stays local-first and file-first, with one shared core used by API, CLI, TUI, MCP, and a minimal web client.
 
-- note titles with multiple markdown bodies
-- hard-link resolution with search fallback
-- soft-link accumulation and ranking
-- private per-user workspaces
-- Git-backed storage with offline-first sync + conflict preservation
-- API, MCP, Web UI, TUI, and CLI clients
+## Product Scope (v1)
 
-## Detailed product goals
+- Notes with one title and multiple markdown bodies.
+- Hard-link parsing (`[[...]]` and `note:` links).
+- Search fallback when hard-link target is unresolved.
+- Soft-link event recording and top related note ranking.
+- Per-user workspace isolation by workspace directory.
+- Git-backed persistence with automatic commits on mutation.
 
-- Knowledge graph first:
-  - Notes should feel like a traversable knowledge network, not a flat document list.
-  - Every user action that reveals note relationships should improve navigation quality.
-- Fast authoring and retrieval:
-  - Creating a note/body should be low-friction and always available offline.
-  - Finding an intended note from ambiguous text should be reliable via search fallback.
-- Durable local truth:
-  - Local workspace remains the source of truth for editing and browsing.
-  - Sync should never silently drop user content.
-- Predictable conflict behavior:
-  - Merge conflicts remain explicit in markdown text for user resolution.
-  - App should identify conflicting notes and guide users to resolve them quickly.
-- Private by default:
-  - Each user workspace is isolated at storage and API layers.
-  - Cross-user data visibility is impossible without explicit future sharing features.
-- Multi-surface consistency:
-  - Web, CLI, TUI, and MCP must use shared domain logic so link behavior is identical.
+## Architecture (Current + Target)
 
-## Workflow and dataflow
+- `packages/core` is the source of truth for note logic.
+- `apps/api` exposes HTTP endpoints and delegates to core.
+- `apps/cli` and `apps/tui` call core directly.
+- `apps/mcp` exposes core over MCP stdio tools.
+- `apps/web` is a static client that calls `/api/*`.
+- Data is on disk under `data/workspaces/<userId>/`:
+  - `notes/<noteId>/note.json`
+  - `notes/<noteId>/bodies/<bodyId>.md`
+  - `.mimex/softlinks.json`
+- Core cache is best-effort under `~/.cache/mimex/` (or `$XDG_CACHE_HOME/mimex`).
 
-### Primary entities
+## Design Principles
 
-- `Note`:
-  - Canonical title, aliases, metadata.
-  - Owns one or more `Body` entries.
-- `Body`:
-  - Markdown document with parsed hard links.
-  - Versioned in Git.
-- `HardLink`:
-  - Explicit markdown link targeting another note title/alias.
-- `SoftLinkEvent`:
-  - Immutable event emitted when user moves from source note to target note.
-- `SoftLinkEdge`:
-  - Aggregated weighted edge derived from events.
+- Keep state in files first; avoid external DB dependency for v1.
+- Reuse core logic everywhere; avoid duplicated behavior per client.
+- Prefer simple deterministic search/ranking over complex indexing.
+- Optimize perceived latency with caching and viewport-limited rendering.
+- Make deployment cheap and debuggable over highly distributed infra.
 
-### Create/edit flow
+## Explicit Non-Goals (v1)
 
-1. User creates or edits note/body in any client.
-2. Client sends command to core via API/CLI/TUI/MCP adapter.
-3. Core writes markdown + note metadata to workspace files.
-4. Core updates local SQLite derived indexes (title/body/search/link index).
-5. Auto-commit worker batches changes into Git commits.
-6. UI reflects saved state immediately from local store.
+- No Postgres-backed note model.
+- No SQLite/FTS indexing service.
+- No JWT auth system in this phase.
+- No collaborative multi-writer conflict workflow UI.
+- No heavy frontend framework requirement.
 
-### Read/link-follow flow
+## Work Plan
 
-1. User opens a note body.
-2. Renderer parses hard links in markdown.
-3. For each link activation:
-   - Try exact/normalized title + alias resolution.
-   - If unresolved, tokenize link text and run FTS search.
-4. User picks destination note from resolved target or search suggestions.
-5. Core records traversal event (`src`, `dst`, `reason`, `delta`, `ts`).
-6. Soft-link aggregation updates top related notes for source note.
+## Phase 1: Core Stability and Performance
 
-### Sync/merge flow
+- Lock core behavior with tests around:
+  - note create/get/list/archive/restore/delete
+  - body add/update
+  - hard-link extraction and follow behavior
+  - soft-link accumulation and ranking
+- Keep cache behavior predictable:
+  - notes metadata cache load on init
+  - cache refresh strategy and invalidation paths
+  - soft-link cache invalidation on writes
+- Address slow paths first in core:
+  - avoid repeated note-body reads where possible
+  - avoid duplicate search invocations in UI flows
 
-1. Background sync loop runs `fetch -> merge -> push` on user workspace remote.
-2. Non-conflicting changes merge normally.
-3. Conflicting note bodies retain Git conflict markers in markdown files.
-4. System marks note as conflict-present for UX surfacing.
-5. Derived indexes rebuild/update after merge to keep search/link graph current.
+Exit criteria:
 
-### Request path by interface
+- Core tests are green and cover critical flows.
+- Large workspaces remain responsive for list/search/follow operations.
 
+## Phase 2: API and MCP Parity
+
+- Keep API endpoints aligned with core capabilities:
+  - notes CRUD, body CRUD, search, follow-link, hard-links, soft-links
+- Keep MCP tool surface aligned with API/core naming and behavior.
+- Document workspace selection model (`x-user-id` or MCP `userId`) and constraints.
+- Add lightweight API integration tests for critical paths.
+
+Exit criteria:
+
+- Same user-visible behavior across API, CLI, TUI, and MCP for core flows.
+- Error semantics are consistent (not-found, bad input, archived constraints).
+
+## Phase 3: Client UX (Practical, Fast)
+
+- TUI:
+  - maintain viewport-based rendering to prevent flashing
+  - keep list and body navigation smooth in large notes
+  - preserve predictable search and selection behavior
+- CLI:
+  - stable porcelain output for automation
+  - complete command coverage for destructive and non-destructive operations
 - Web:
-  - Browser -> API (`/api`) -> core -> filesystem/git/index.
-- CLI/TUI:
-  - Local command -> API or direct core process -> filesystem/git/index.
-- MCP:
-  - MCP tool call (`/mcp` or stdio) -> MCP adapter -> core -> filesystem/git/index.
-
-## UX specification
-
-### Information architecture
-
-- Main views:
-  - Home/search
-  - Note detail
-  - Conflict inbox
-  - Recent activity
-- Note detail regions:
-  - Title + aliases
-  - Body tabs/switcher
-  - Markdown editor/viewer
-  - Hard-link suggestions (when unresolved)
-  - Top soft links panel
-
-### Authoring UX
-
-- Create note from title-first input.
-- Add multiple bodies to same title with labels (for distinct writeups).
-- Markdown preview toggle and keyboard shortcuts for quick linking.
-- Inline link state badges:
-  - resolved hard link
-  - unresolved link with suggestion action
-
-### Navigation UX
-
-- Clicking resolved hard link moves directly to destination note.
-- Clicking unresolved link opens ranked candidate picker from search fallback.
-- Every successful transition updates soft-link graph in background.
-- Top soft links show:
-  - target title
-  - current weight
-  - reason summary (hard/search mix)
-
-### Conflict UX
-
-- Dedicated conflict list sorted by most recently synced conflict.
-- Note page warning banner when current body contains conflict markers.
-- Side-by-side helper:
-  - current merged text with markers
-  - optional clean base/remote snapshots when available
-- Resolve action writes cleaned markdown and commits resolution.
-
-### Cross-surface UX parity
-
-- Same commands and semantics across web/CLI/TUI:
-  - create note/body
-  - follow link
-  - unresolved link candidate pick
-  - view top soft links
-  - view/resolve conflicts
-- CLI and TUI prioritize keyboard-driven flows with minimal prompts.
-- Web emphasizes discoverability and visual relationship cues.
-
-## Milestones
-
-## Milestone 0: Monorepo bootstrap (1 week)
-
-- Initialize pnpm + turbo workspace.
-- Create app/package layout:
-  - `apps/api`, `apps/mcp`, `apps/web`, `apps/cli`, `apps/tui`
-  - `packages/core`, `packages/shared-types`
-- Add baseline CI (lint, typecheck, unit tests).
+  - minimal grayscale hard-line UI
+  - responsive layout for phone and desktop
+  - fast list/search/open-note flow
 
 Exit criteria:
 
-- All packages build and test in CI.
-- Shared lint/type settings are enforced across repo.
+- Daily workflows are fast in TUI and CLI.
+- Web is usable on mobile and desktop without layout breakage.
 
-## Milestone 1: Core note model + storage (1-2 weeks)
+## Phase 4: Slim Cloud Deployment
 
-- Implement core entities: `Note`, `Body`, `HardLink`, `SoftLinkEdge`.
-- Define on-disk Git-backed layout for notes and bodies.
-- Implement create/read/update operations in `packages/core`.
-- Add automatic commit batching (debounced commits).
-
-Exit criteria:
-
-- Notes and multi-body writes are persisted in Git repo.
-- Commits generated automatically for mutations.
-
-## Milestone 2: Link engine + search (1-2 weeks)
-
-- Parse markdown for hard links.
-- Resolve links by canonical title + aliases.
-- Add SQLite FTS5 index for title/body lookup.
-- Implement unresolved-link search fallback.
+- Keep single-host deploy model:
+  - one EC2 host
+  - Caddy reverse proxy
+  - web + api containers
+- Align deployment scripts with actual repo state:
+  - add and maintain required Dockerfiles
+  - remove unused runtime dependencies from compose
+- Keep workspace storage persistent on host volume.
 
 Exit criteria:
 
-- Clicking unresolved links returns ranked note candidates.
-- Index rebuild from disk is deterministic.
+- One-command release succeeds end-to-end.
+- `/`, `/api/*`, and MCP runtime path are clearly defined and functional.
 
-## Milestone 3: Soft-link graph and ranking (1 week)
+## Phase 5: Hardening and Operations
 
-- Add append-only traversal events (`src`, `dst`, `reason`, `delta`, `ts`).
-- Aggregate weighted soft-link edges by note.
-- Expose top soft links API from core.
-
-Exit criteria:
-
-- Following hard/search links increments soft-link weights.
-- Top-N soft links are stable across restarts and syncs.
-
-## Milestone 4: API + auth + private workspaces (2 weeks)
-
-- Implement Fastify API with JWT auth.
-- Add account/workspace metadata (Postgres schema + migrations).
-- Map each authenticated user to isolated workspace root.
-- Add permission guards for all note and link endpoints.
+- Add practical operational safeguards:
+  - health checks
+  - structured logs
+  - backup/restore steps for workspace data
+- Add release checklist:
+  - build, tests, smoke checks
+  - rollback procedure
+- Document incident triage for corrupted note files or git issues.
 
 Exit criteria:
 
-- User cannot access another user workspace data.
-- API contract tests cover authz boundary cases.
+- Operator runbook exists and is tested.
+- Recovery steps are straightforward and repeatable.
 
-## Milestone 5: Sync/merge behavior (1-2 weeks)
+## Cloud Topology (Slim)
 
-- Implement background Git sync loop (fetch/merge/push).
-- Preserve merge conflict markers in note markdown on conflict.
-- Rebuild derived indexes after sync merges.
+- DNS: root domain -> EC2 Elastic IP.
+- TLS: terminated at Caddy on host.
+- Routing:
+  - `/` -> web container
+  - `/api/*` -> api container
+  - MCP via stdio process for now, or explicit HTTP bridge when implemented.
+- Persistent data:
+  - workspace files mounted into API container.
+  - optional backups to object storage.
 
-Exit criteria:
+## Risks and Mitigations
 
-- Concurrent edits from two devices merge without data loss.
-- Conflicts remain visible for manual resolution.
+- Risk: large workspace degrades list/search latency.
+  - Mitigation: cache metadata aggressively, avoid duplicate scans, profile hot paths.
+- Risk: drift between docs and deployed reality.
+  - Mitigation: keep deployment docs generated from actual scripts/config.
+- Risk: MCP transport mismatch in cloud docs.
+  - Mitigation: either keep MCP as stdio-only or add a dedicated HTTP MCP bridge and document it explicitly.
 
-## Milestone 6: Client surfaces (2-3 weeks)
+## Definition of Done for Slim v1
 
-- Web app:
-  - note viewer/editor
-  - multi-body navigation
-  - hard-link traversal + unresolved suggestions
-  - soft-link sidebar
-- CLI and TUI:
-  - create/update/search/follow/top-soft-links
-- MCP:
-  - expose note/search/follow/sync operations
-
-Exit criteria:
-
-- Same core behaviors validated across web/CLI/TUI/MCP.
-
-## Milestone 7: Hardening + observability (1-2 weeks)
-
-- Add structured logs, request IDs, and audit events.
-- Add backups/snapshots for host storage and Postgres volume.
-- Add smoke tests and release checks in CI.
-
-Exit criteria:
-
-- Recovery drill documented and tested.
-- Production health checks and alerts configured.
-
-## Milestone 8: GA readiness (1 week)
-
-- Security review (auth, path traversal, injection, secrets handling).
-- Performance pass on search and render hotspots.
-- Documentation completion (operator guide + user quickstart).
-
-Exit criteria:
-
-- Release checklist complete.
-- v1 tag and changelog published.
-
-## Cross-cutting standards
-
-- Strict TypeScript mode across all packages.
-- Contract-first API (Zod schemas reused by clients).
-- Test minimums:
-  - core domain logic: high unit coverage
-  - API behavior: integration coverage for critical flows
-  - end-to-end: note creation, linking, search fallback, sync conflict path
+- Core behavior is tested and stable.
+- API, CLI, TUI, and MCP agree on semantics.
+- Web client supports practical browse/search/read workflows on phone and desktop.
+- Single-host deployment path works without manual fixups.
+- Operator documentation matches the running system.

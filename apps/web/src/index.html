@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mimex Web</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <h1>MIMEX</h1>
+        <p>Minimal note explorer</p>
+      </header>
+
+      <section class="controls" aria-label="controls">
+        <label>
+          User
+          <input id="userId" type="text" value="local" autocomplete="off" />
+        </label>
+        <label>
+          Search
+          <input id="searchInput" type="search" placeholder="title or body text" autocomplete="off" />
+        </label>
+        <label class="checkbox">
+          <input id="includeArchived" type="checkbox" />
+          include archived
+        </label>
+        <button id="refreshBtn" type="button">refresh</button>
+      </section>
+
+      <section class="status-row" aria-live="polite">
+        <span id="statusText">Ready.</span>
+      </section>
+
+      <main class="panes">
+        <aside class="pane pane-list" aria-label="notes">
+          <div class="pane-title">Notes</div>
+          <div id="noteList" class="note-list"></div>
+        </aside>
+
+        <section class="pane pane-detail" aria-label="note detail">
+          <div class="pane-title">Detail</div>
+          <article id="noteDetail" class="note-detail empty">
+            Select a note.
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
