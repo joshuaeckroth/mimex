@@ -10,5 +10,10 @@
     "typecheck": "echo 'no typecheck for web yet'",
     "test": "echo 'no tests for web yet'",
     "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@highlightjs/cdn-assets": "^11.11.1",
+    "dompurify": "^3.3.1",
+    "markdown-it": "^14.1.1"
   }
 }

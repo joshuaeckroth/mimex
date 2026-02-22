@@ -2,6 +2,7 @@ FROM node:20-alpine
 
 WORKDIR /app
 COPY apps/web/package.json ./package.json
+RUN npm install --omit=dev
 COPY apps/web/src ./src
 COPY apps/web/scripts ./scripts
 

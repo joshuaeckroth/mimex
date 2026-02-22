@@ -25,6 +25,7 @@ const state = {
   searchResults: [],
   selectedNoteId: null,
   selectedNote: null,
+  includeArchived: false,
   focusPane: "notes",
   activeBodyIndex: 0,
   loading: false,
@@ -124,6 +125,66 @@ function initUiPrefs() {
   applyUiState();
 }
 
+function parseHashState() {
+  const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  if (!raw) {
+    return { noteId: null, query: null, includeArchived: null };
+  }
+
+  if (!raw.includes("=") && !raw.includes("&")) {
+    try {
+      return { noteId: decodeURIComponent(raw), query: null, includeArchived: null };
+    } catch {
+      return { noteId: raw, query: null, includeArchived: null };
+    }
+  }
+
+  const params = new URLSearchParams(raw);
+  const noteId = (params.get("note") || "").trim() || null;
+  const query = params.has("q") ? (params.get("q") ?? "") : null;
+
+  let includeArchived = null;
+  if (params.has("archived")) {
+    const archivedRaw = (params.get("archived") || "").trim().toLowerCase();
+    includeArchived = archivedRaw === "1" || archivedRaw === "true" || archivedRaw === "yes";
+  }
+
+  return { noteId, query, includeArchived };
+}
+
+function applyInitialHashState() {
+  const hashState = parseHashState();
+  if (hashState.query !== null) {
+    els.searchInput.value = hashState.query;
+  }
+  if (hashState.includeArchived !== null) {
+    els.includeArchived.checked = hashState.includeArchived;
+  }
+  state.includeArchived = els.includeArchived.checked;
+  return hashState.noteId;
+}
+
+function writeHashState() {
+  const params = new URLSearchParams();
+  const query = els.searchInput.value.trim();
+  if (query) {
+    params.set("q", query);
+  }
+  if (els.includeArchived.checked) {
+    params.set("archived", "1");
+  }
+  if (state.selectedNoteId) {
+    params.set("note", state.selectedNoteId);
+  }
+
+  const hash = params.toString();
+  const next = `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ""}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next !== current) {
+    window.history.replaceState(null, "", next);
+  }
+}
+
 function getUserId() {
   return (els.userId.value || "local").trim() || "local";
 }
@@ -209,9 +270,185 @@ function updateCachedNoteMeta(nextNoteMeta) {
   state.notes.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-function stripTrailingPunctuation(url) {
-  return url.replace(/[),.;!?]+$/g, "");
+function normalizeCodeLanguage(raw) {
+  const value = (raw || "").trim().toLowerCase();
+  if (!value) {
+    return "";
+  }
+  if (["js", "jsx", "ts", "tsx", "javascript", "typescript"].includes(value)) {
+    return "javascript";
+  }
+  if (["py", "python"].includes(value)) {
+    return "python";
+  }
+  if (["sh", "bash", "zsh", "shell"].includes(value)) {
+    return "bash";
+  }
+  if (["yml"].includes(value)) {
+    return "yaml";
+  }
+  return value;
 }
+
+function normalizeFenceLanguage(hintedLanguage, code) {
+  const normalized = normalizeCodeLanguage(hintedLanguage);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "javascript") {
+    const sample = (code || "").slice(0, 500);
+    if (
+      /(?:^|\n)\s*(?:[A-Z_][A-Z0-9_]*=|export\s+[A-Z_][A-Z0-9_]*=|\.\/|docker\b|kubectl\b|helm\b|pnpm\b|npm\b|yarn\b|poetry\b)/m.test(
+        sample
+      )
+    ) {
+      return "bash";
+    }
+  }
+  return normalized;
+}
+
+function createMarkdownRenderer() {
+  const markdownItFactory = window.markdownit;
+  const domPurify = window.DOMPurify;
+  const hljs = window.hljs;
+
+  if (typeof markdownItFactory !== "function" || !domPurify) {
+    return null;
+  }
+
+  const md = markdownItFactory({
+    html: true,
+    linkify: true,
+    typographer: false
+  });
+
+  md.linkify.set({ fuzzyEmail: false });
+
+  md.inline.ruler.before("link", "wikilink", (state, silent) => {
+    const start = state.pos;
+    const src = state.src;
+    if (src.charCodeAt(start) !== 0x5b || src.charCodeAt(start + 1) !== 0x5b) {
+      return false;
+    }
+    const end = src.indexOf("]]", start + 2);
+    if (end < 0) {
+      return false;
+    }
+    const target = src.slice(start + 2, end).trim();
+    if (!target) {
+      return false;
+    }
+
+    if (!silent) {
+      const tokenOpen = state.push("link_open", "a", 1);
+      tokenOpen.attrs = [
+        ["href", `#note:${encodeURIComponent(target)}`],
+        ["class", "internal-link"]
+      ];
+      const text = state.push("text", "", 0);
+      text.content = `[[${target}]]`;
+      state.push("link_close", "a", -1);
+    }
+
+    state.pos = end + 2;
+    return true;
+  });
+
+  const defaultLinkOpen =
+    md.renderer.rules.link_open ??
+    ((tokens, idx, options, env, self) => {
+      return self.renderToken(tokens, idx, options);
+    });
+
+  md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    const hrefIdx = tokens[idx].attrIndex("href");
+    if (hrefIdx >= 0) {
+      const href = tokens[idx].attrs?.[hrefIdx]?.[1] ?? "";
+      const hrefLower = href.toLowerCase();
+      if (hrefLower.startsWith("note:")) {
+        let rawTarget = href.slice(5);
+        try {
+          rawTarget = decodeURIComponent(rawTarget);
+        } catch {
+          // keep raw target when not URI encoded
+        }
+        tokens[idx].attrs[hrefIdx][1] = `#note:${encodeURIComponent(rawTarget)}`;
+        tokens[idx].attrJoin("class", "internal-link");
+      } else if (href.startsWith("#note:")) {
+        tokens[idx].attrJoin("class", "internal-link");
+      } else if (/^https?:\/\//i.test(href)) {
+        tokens[idx].attrSet("target", "_blank");
+        tokens[idx].attrSet("rel", "noopener noreferrer");
+      }
+    }
+
+    return defaultLinkOpen(tokens, idx, options, env, self);
+  };
+
+  md.renderer.rules.code_inline = (tokens, idx) => {
+    const content = md.utils.escapeHtml(tokens[idx].content ?? "");
+    return `<code class="md-inline-code">${content}</code>`;
+  };
+
+  md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table class="md-table">';
+  md.renderer.rules.table_close = () => "</table></div>";
+
+  md.renderer.rules.fence = (tokens, idx) => {
+    const token = tokens[idx];
+    const info = md.utils.unescapeAll(token.info ?? "").trim();
+    const hintedLanguage = info.split(/\s+/g)[0] ?? "";
+    const code = token.content ?? "";
+    const language = normalizeFenceLanguage(hintedLanguage, code);
+
+    let classLanguage = language || "plain";
+    let highlightedCode = md.utils.escapeHtml(code);
+
+    if (hljs) {
+      if (language && hljs.getLanguage(language)) {
+        try {
+          highlightedCode = hljs.highlight(code, { language, ignoreIllegals: true }).value;
+          classLanguage = language;
+        } catch {
+          highlightedCode = md.utils.escapeHtml(code);
+          classLanguage = language || "plain";
+        }
+      } else {
+        try {
+          const auto = hljs.highlightAuto(code);
+          highlightedCode = auto.value;
+          classLanguage = auto.language ? normalizeCodeLanguage(auto.language) || auto.language : "plain";
+        } catch {
+          highlightedCode = md.utils.escapeHtml(code);
+          classLanguage = "plain";
+        }
+      }
+    }
+
+    const label =
+      classLanguage && classLanguage !== "plain"
+        ? `<div class="md-code-label">${md.utils.escapeHtml(classLanguage)}</div>`
+        : "";
+
+    return `<div class="md-code-block">${label}<pre><code class="md-code hljs language-${md.utils.escapeHtml(classLanguage)}">${highlightedCode}</code></pre></div>`;
+  };
+
+  function sanitizeHtml(html) {
+    return domPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      ADD_ATTR: ["class", "target", "rel"]
+    });
+  }
+
+  return {
+    render(markdown) {
+      return md.render(markdown ?? "");
+    },
+    sanitize: sanitizeHtml
+  };
+}
+
+const markdownRenderer = createMarkdownRenderer();
 
 async function followInternalLink(sourceNoteId, targetHint) {
   const target = targetHint.trim();
@@ -245,81 +482,42 @@ async function followInternalLink(sourceNoteId, targetHint) {
   }
 }
 
-function renderMarkdownInto(container, markdown, sourceNoteId) {
-  const regex = /\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>()]+)/g;
-  let idx = 0;
-
-  for (const match of markdown.matchAll(regex)) {
-    const start = match.index ?? 0;
-    if (start > idx) {
-      container.append(document.createTextNode(markdown.slice(idx, start)));
-    }
-
-    if (match[1]) {
-      const target = match[1].trim();
-      const anchor = document.createElement("a");
-      anchor.href = "#";
-      anchor.textContent = `[[${target}]]`;
-      anchor.className = "internal-link";
+function bindRenderedLinks(container, sourceNoteId) {
+  const anchors = container.querySelectorAll("a[href]");
+  for (const anchor of anchors) {
+    const href = (anchor.getAttribute("href") || "").trim();
+    if (/^(?:#note:|note:)/i.test(href)) {
+      anchor.classList.add("internal-link");
       anchor.addEventListener("click", (event) => {
         event.preventDefault();
+        let target = href.replace(/^(?:#note:|note:)/i, "");
+        try {
+          target = decodeURIComponent(target);
+        } catch {
+          // keep literal target when malformed URI encoding
+        }
         void followInternalLink(sourceNoteId, target);
       });
-      container.append(anchor);
-      idx = start + match[0].length;
       continue;
     }
-
-    if (match[2] && match[3]) {
-      const label = match[2];
-      const rawTarget = match[3].trim();
-      const isInternal = rawTarget.toLowerCase().startsWith("note:");
-      let target = rawTarget;
-      if (isInternal) {
-        try {
-          target = decodeURIComponent(rawTarget.slice(5));
-        } catch {
-          target = rawTarget.slice(5);
-        }
-      }
-      const anchor = document.createElement("a");
-      anchor.textContent = label;
-      if (isInternal) {
-        anchor.href = "#";
-        anchor.className = "internal-link";
-        anchor.addEventListener("click", (event) => {
-          event.preventDefault();
-          void followInternalLink(sourceNoteId, target);
-        });
-      } else {
-        anchor.href = rawTarget;
-        anchor.target = "_blank";
-        anchor.rel = "noopener noreferrer";
-      }
-      container.append(anchor);
-      idx = start + match[0].length;
-      continue;
+    if (/^https?:\/\//i.test(href)) {
+      anchor.setAttribute("target", "_blank");
+      anchor.setAttribute("rel", "noopener noreferrer");
     }
-
-    const detected = stripTrailingPunctuation(match[4] ?? "");
-    const tail = (match[4] ?? "").slice(detected.length);
-    if (detected) {
-      const anchor = document.createElement("a");
-      anchor.href = detected;
-      anchor.textContent = detected;
-      anchor.target = "_blank";
-      anchor.rel = "noopener noreferrer";
-      container.append(anchor);
-    }
-    if (tail) {
-      container.append(document.createTextNode(tail));
-    }
-    idx = start + match[0].length;
   }
+}
 
-  if (idx < markdown.length) {
-    container.append(document.createTextNode(markdown.slice(idx)));
+function renderMarkdownInto(container, markdown, sourceNoteId) {
+  container.innerHTML = "";
+  const body = markdown ?? "";
+  if (!markdownRenderer) {
+    container.textContent = body;
+    return;
   }
+  const rendered = markdownRenderer.render(body);
+  const sanitized = markdownRenderer.sanitize(rendered);
+  container.innerHTML = sanitized;
+  bindRenderedLinks(container, sourceNoteId);
 }
 
 function renderNoteList() {
@@ -415,9 +613,38 @@ function renderNoteDetail() {
     card.className = `body-card${isActiveBody ? " active" : ""}`;
     card.dataset.bodyIndex = String(bodyIndex);
 
+    const bodyKey = `${note.note.id}:${body.id}`;
+    const isEditing = state.editingBodyIds.has(bodyKey);
+    const isSaving = state.savingBodyIds.has(bodyKey);
+
     const label = document.createElement("div");
     label.className = "body-label";
-    label.textContent = `${body.label} | ${formatDate(body.updatedAt)}`;
+    const labelText = document.createElement("span");
+    labelText.className = "body-label-text";
+    labelText.textContent = `${body.label} | ${formatDate(body.updatedAt)}`;
+    label.append(labelText);
+
+    if (!isEditing) {
+      const labelActions = document.createElement("div");
+      labelActions.className = "body-label-actions";
+
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "body-label-btn";
+      editBtn.textContent = "edit body";
+      editBtn.disabled = isSaving;
+      editBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        state.editingBodyIds.add(bodyKey);
+        state.bodyDrafts.set(bodyKey, body.markdown);
+        renderNoteDetail();
+      });
+
+      labelActions.append(editBtn);
+      label.append(labelActions);
+    }
+
     label.addEventListener("click", () => {
       state.activeBodyIndex = bodyIndex;
       state.focusPane = "body";
@@ -425,33 +652,14 @@ function renderNoteDetail() {
       renderNoteDetail();
     });
 
-    const bodyKey = `${note.note.id}:${body.id}`;
-    const isEditing = state.editingBodyIds.has(bodyKey);
-    const isSaving = state.savingBodyIds.has(bodyKey);
-
     const wrap = document.createElement("div");
     wrap.className = "body-editor-wrap";
 
     if (!isEditing) {
-      const text = document.createElement("pre");
+      const text = document.createElement("div");
       text.className = "body-markdown";
       renderMarkdownInto(text, body.markdown, note.note.id);
-
-      const actions = document.createElement("div");
-      actions.className = "body-actions";
-
-      const editBtn = document.createElement("button");
-      editBtn.type = "button";
-      editBtn.textContent = "edit body";
-      editBtn.disabled = isSaving;
-      editBtn.addEventListener("click", () => {
-        state.editingBodyIds.add(bodyKey);
-        state.bodyDrafts.set(bodyKey, body.markdown);
-        renderNoteDetail();
-      });
-
-      actions.append(editBtn);
-      wrap.append(text, actions);
+      wrap.append(text);
       card.append(label, wrap);
       els.noteDetail.append(card);
       continue;
@@ -551,6 +759,7 @@ async function selectNote(noteId) {
   }
 
   state.selectedNoteId = noteId;
+  writeHashState();
   if (isMobileViewport()) {
     state.sidebarOpen = false;
     applyUiState();
@@ -591,12 +800,14 @@ async function fetchList() {
   );
 }
 
-async function refreshList({ preserveSelection = true } = {}) {
+async function refreshList({ preserveSelection = true, preferredNoteId = null } = {}) {
   if (state.loading) {
     return;
   }
 
   state.loading = true;
+  state.includeArchived = els.includeArchived.checked;
+  writeHashState();
   setStatus("Loading notes...");
 
   try {
@@ -604,25 +815,28 @@ async function refreshList({ preserveSelection = true } = {}) {
 
     const rows = listRows();
     const searching = els.searchInput.value.trim().length > 0;
-    if (searching) {
+    const preferredStillVisible = preferredNoteId ? rows.some((row) => row.id === preferredNoteId) : false;
+    const selectedStillVisible = preserveSelection && rows.some((row) => row.id === state.selectedNoteId);
+
+    if (preferredStillVisible) {
+      state.selectedNoteId = preferredNoteId;
+    } else if (!selectedStillVisible) {
       state.selectedNoteId = rows[0]?.id ?? null;
-    } else {
-      const selectedStillVisible = preserveSelection && rows.some((row) => row.id === state.selectedNoteId);
-      if (!selectedStillVisible) {
-        state.selectedNoteId = rows[0]?.id ?? null;
-      }
     }
 
     renderNoteList();
     if (searching) {
       els.noteList.scrollTop = 0;
     }
+    writeHashState();
 
     if (state.selectedNoteId) {
       await selectNote(state.selectedNoteId);
     } else {
       state.selectedNote = null;
+      state.selectedNoteId = null;
       renderNoteDetail();
+      writeHashState();
       setStatus("No notes found.");
     }
   } catch (error) {
@@ -882,6 +1096,7 @@ async function deleteSelectedNote() {
 async function toggleArchivedFilter() {
   state.includeArchived = !state.includeArchived;
   els.includeArchived.checked = state.includeArchived;
+  writeHashState();
   await refreshList({ preserveSelection: false });
   setStatus(state.includeArchived ? "Showing archived notes" : "Hiding archived notes");
 }
@@ -1119,10 +1334,13 @@ els.refreshBtn.addEventListener("click", () => {
 });
 
 els.includeArchived.addEventListener("change", () => {
+  state.includeArchived = els.includeArchived.checked;
+  writeHashState();
   void refreshList({ preserveSelection: false });
 });
 
 els.searchInput.addEventListener("input", () => {
+  writeHashState();
   scheduleSearch();
 });
 
@@ -1145,4 +1363,6 @@ window.addEventListener("resize", () => {
 window.addEventListener("keydown", onGlobalKeydown);
 
 initUiPrefs();
-void refreshList({ preserveSelection: false });
+const initialPreferredNoteId = applyInitialHashState();
+writeHashState();
+void refreshList({ preserveSelection: false, preferredNoteId: initialPreferredNoteId });

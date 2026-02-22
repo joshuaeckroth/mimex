@@ -23,6 +23,13 @@ const port = Number(argMap.port ?? process.env.PORT ?? 5173);
 const host = process.env.HOST ?? "127.0.0.1";
 const apiOrigin = process.env.API_ORIGIN ?? "http://127.0.0.1:8080";
 const staticRoot = path.resolve(root, rootName);
+const nodeModulesRoot = path.join(root, "node_modules");
+
+const vendorFallbackMap = {
+  "vendor/markdown-it.min.js": path.join(nodeModulesRoot, "markdown-it", "dist", "markdown-it.min.js"),
+  "vendor/purify.min.js": path.join(nodeModulesRoot, "dompurify", "dist", "purify.min.js"),
+  "vendor/highlight.min.js": path.join(nodeModulesRoot, "@highlightjs", "cdn-assets", "highlight.min.js")
+};
 
 const mimeByExt = {
   ".html": "text/html; charset=utf-8",
@@ -83,13 +90,20 @@ function proxyToApi(req, res) {
 async function serveStatic(req, res) {
   const normalized = safePath(req.url ?? "/");
   let requested = path.join(staticRoot, normalized || "index.html");
+  let usingVendorFallback = false;
 
   if (!(await fileExists(requested))) {
-    requested = path.join(staticRoot, "index.html");
+    const vendorFallback = vendorFallbackMap[normalized];
+    if (vendorFallback && (await fileExists(vendorFallback))) {
+      requested = vendorFallback;
+      usingVendorFallback = true;
+    } else {
+      requested = path.join(staticRoot, "index.html");
+    }
   }
 
   const rel = path.relative(staticRoot, requested);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (!usingVendorFallback && (rel.startsWith("..") || path.isAbsolute(rel))) {
     res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
     res.end("Forbidden");
     return;
