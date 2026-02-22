@@ -66,6 +66,7 @@ interface BodyRenderCache {
   activeBodyIndex: number;
   hardLinks: HardLink[];
   softLinks: SoftLinkTarget[];
+  pendingNoteTitle: string | null;
   bodyTextWidth: number;
   themeName: ThemeName;
   render: BodyRender;
@@ -74,6 +75,7 @@ interface BodyRenderCache {
 interface TuiState {
   theme: ThemeName;
   includeArchived: boolean;
+  searchQuery: string;
   notes: NoteMeta[];
   selectedIndex: number;
   details: NoteDetailsState;
@@ -497,10 +499,23 @@ function renderBodyBreakMarker(
   return `${left}${right}`;
 }
 
-function buildBodyRender(details: NoteDetailsState, bodyTextWidth: number, theme: ThemePalette): BodyRender {
+function buildBodyRender(
+  details: NoteDetailsState,
+  bodyTextWidth: number,
+  theme: ThemePalette,
+  pendingNoteTitle: string | null
+): BodyRender {
   const { openedNote, activeBodyIndex, hardLinks, softLinks } = details;
 
   if (!openedNote) {
+    if (pendingNoteTitle) {
+      return {
+        lines: [colorizeLine(escapeBlessedTags(pendingNoteTitle), theme.mdHeadingFg, true), "", "Loading note details..."],
+        bodyStarts: [],
+        hardLinkHits: []
+      };
+    }
+
     return {
       lines: ["Select a note.", "", "Hard links: 0", "Top soft: (none)"],
       bodyStarts: [],
@@ -567,6 +582,7 @@ function main(): void {
   const state: TuiState = {
     theme: resolveInitialTheme(THEME_ENV),
     includeArchived: false,
+    searchQuery: "",
     notes: [],
     selectedIndex: 0,
     details: {
@@ -585,6 +601,9 @@ function main(): void {
   };
 
   let isBusy = false;
+  let allNotes: NoteMeta[] = [];
+  let unfilteredSelectedNoteId: string | null = null;
+  let pendingNoteTitle: string | null = null;
   let detailLoadToken = 0;
   let lastBodyRender: BodyRender = { lines: [], bodyStarts: [], hardLinkHits: [] };
   let bodyRenderCache: BodyRenderCache | null = null;
@@ -627,7 +646,7 @@ function main(): void {
     vi: false,
     tags: false,
     scrollable: true,
-    alwaysScroll: true,
+    alwaysScroll: false,
     style: {
       bg: THEMES[state.theme].notesBg,
       border: { fg: THEMES[state.theme].borderBlurred },
@@ -706,7 +725,21 @@ function main(): void {
     state.status = message;
   }
 
+  function rememberUnfilteredSelection(noteId?: string | null): void {
+    if (state.searchQuery) {
+      return;
+    }
+
+    if (typeof noteId === "string") {
+      unfilteredSelectedNoteId = noteId;
+      return;
+    }
+
+    unfilteredSelectedNoteId = getSelectedNote()?.id ?? null;
+  }
+
   function applyResolvedDetails(resolved: ResolvedNoteDetails): void {
+    pendingNoteTitle = null;
     const previousNoteId = state.details.openedNote?.note.id;
     const noteChanged = previousNoteId !== resolved.note.note.id;
 
@@ -722,6 +755,22 @@ function main(): void {
     if (noteChanged) {
       state.bodyScrollOffset = 0;
     }
+  }
+
+  function setPendingNoteDetails(note: NoteMeta | null): void {
+    if (!note) {
+      pendingNoteTitle = null;
+      return;
+    }
+
+    pendingNoteTitle = note.title;
+    state.details = {
+      openedNote: null,
+      activeBodyIndex: 0,
+      hardLinks: [],
+      softLinks: []
+    };
+    state.bodyScrollOffset = 0;
   }
 
   async function fetchResolvedDetails(noteRef: string, force = false): Promise<ResolvedNoteDetails> {
@@ -781,23 +830,60 @@ function main(): void {
         return;
       }
 
+      pendingNoteTitle = null;
       setStatus(`Error: ${(error as Error).message}`);
       renderUI();
     }
   }
 
-  async function refresh(preferredId?: string, includeArchivedValue = state.includeArchived): Promise<void> {
+  async function filterNotesBySearch(
+    listed: NoteMeta[],
+    query: string,
+    includeArchivedValue: boolean
+  ): Promise<NoteMeta[]> {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      return listed;
+    }
+
+    const results = await core.searchNotes(normalizedQuery, Math.max(25, listed.length), {
+      includeArchived: includeArchivedValue
+    });
+    if (results.length === 0) {
+      return [];
+    }
+
+    const notesById = new Map(listed.map((note) => [note.id, note] as const));
+    const filtered: NoteMeta[] = [];
+    for (const result of results) {
+      const note = notesById.get(result.noteId);
+      if (note) {
+        filtered.push(note);
+      }
+    }
+
+    return filtered;
+  }
+
+  async function refresh(
+    preferredId?: string,
+    includeArchivedValue = state.includeArchived,
+    selectFirst = false
+  ): Promise<void> {
     setStatus("Refreshing notes...");
     renderUI();
 
-    const previousId = preferredId ?? getSelectedNote()?.id;
+    const previousId = selectFirst ? undefined : preferredId ?? getSelectedNote()?.id;
     const listed = await core.listNotes({ includeArchived: includeArchivedValue });
+    const filtered = await filterNotesBySearch(listed, state.searchQuery, includeArchivedValue);
 
+    allNotes = listed;
     state.includeArchived = includeArchivedValue;
-    state.notes = listed;
+    state.notes = filtered;
     detailsCache.clear();
 
     if (listed.length === 0) {
+      pendingNoteTitle = null;
       state.selectedIndex = 0;
       state.details = {
         openedNote: null,
@@ -806,14 +892,30 @@ function main(): void {
         softLinks: []
       };
       state.bodyScrollOffset = 0;
+      unfilteredSelectedNoteId = null;
       setStatus("No notes yet. Press n to create one.");
       renderUI();
       return;
     }
 
+    if (filtered.length === 0) {
+      pendingNoteTitle = null;
+      state.selectedIndex = 0;
+      state.details = {
+        openedNote: null,
+        activeBodyIndex: 0,
+        hardLinks: [],
+        softLinks: []
+      };
+      state.bodyScrollOffset = 0;
+      setStatus(`No matches for "${state.searchQuery}"`);
+      renderUI();
+      return;
+    }
+
     let nextIndex = 0;
-    if (previousId) {
-      const found = listed.findIndex((note) => note.id === previousId);
+    if (!selectFirst && previousId) {
+      const found = filtered.findIndex((note) => note.id === previousId);
       if (found >= 0) {
         nextIndex = found;
       }
@@ -821,20 +923,26 @@ function main(): void {
 
     state.selectedIndex = nextIndex;
 
-    const selectedNote = listed[nextIndex];
+    const selectedNote = filtered[nextIndex];
     if (selectedNote) {
+      rememberUnfilteredSelection(selectedNote.id);
       const token = detailLoadToken + 1;
       detailLoadToken = token;
+      setPendingNoteDetails(selectedNote);
       await loadDetails(selectedNote.id, token, true);
 
       prefetchDetails(
-        listed
+        filtered
           .map((note) => note.id)
           .filter((id) => id !== selectedNote.id)
       );
     }
 
-    setStatus(`Loaded ${listed.length} notes`);
+    if (state.searchQuery) {
+      setStatus(`Loaded ${filtered.length}/${listed.length} matching notes`);
+    } else {
+      setStatus(`Loaded ${listed.length} notes`);
+    }
     renderUI();
   }
 
@@ -962,8 +1070,9 @@ function main(): void {
   }
 
   function completionCandidatesForMode(mode: InputMode): string[] {
-    const titleAndAlias = uniqueSorted(state.notes.flatMap((note) => [note.title, ...note.aliases]));
-    const noteRefs = uniqueSorted(state.notes.flatMap((note) => [note.id, note.title, ...note.aliases]));
+    const completionSource = allNotes.length > 0 ? allNotes : state.notes;
+    const titleAndAlias = uniqueSorted(completionSource.flatMap((note) => [note.title, ...note.aliases]));
+    const noteRefs = uniqueSorted(completionSource.flatMap((note) => [note.id, note.title, ...note.aliases]));
     const hardLinks = uniqueSorted(state.details.hardLinks.map((link) => link.raw));
 
     if (mode === "search") {
@@ -1090,6 +1199,7 @@ function main(): void {
       renderUI();
       return;
     }
+    rememberUnfilteredSelection(nextId);
 
     const cached = detailsCache.get(nextId);
     if (cached) {
@@ -1100,6 +1210,7 @@ function main(): void {
 
     const token = detailLoadToken + 1;
     detailLoadToken = token;
+    setPendingNoteDetails(state.notes[next] ?? null);
     setStatus("Loading note...");
     renderUI();
     void loadDetails(nextId, token);
@@ -1136,22 +1247,32 @@ function main(): void {
       return;
     }
 
-    if (!value) {
-      setStatus("Cancelled empty input");
+    if (currentMode === "search") {
+      const previousSearchQuery = state.searchQuery;
+      if (!value) {
+        const restoreId = unfilteredSelectedNoteId ?? undefined;
+        state.searchQuery = "";
+        await refresh(restoreId);
+      } else {
+        if (!previousSearchQuery) {
+          rememberUnfilteredSelection();
+        }
+        state.searchQuery = value;
+        await refresh(undefined, state.includeArchived, true);
+      }
+      if (!value) {
+        setStatus("Search cleared");
+      } else if (state.notes.length === 0) {
+        setStatus(`No matches for "${value}"`);
+      } else {
+        setStatus(`Search matched ${state.notes.length} notes`);
+      }
       renderUI();
       return;
     }
 
-    if (currentMode === "search") {
-      const results = await core.searchNotes(value, 25, { includeArchived: state.includeArchived });
-      if (results.length === 0) {
-        setStatus("No matches");
-        renderUI();
-        return;
-      }
-
-      await refresh(results[0]?.noteId);
-      setStatus(`Search matched ${results.length} notes`);
+    if (!value) {
+      setStatus("Cancelled empty input");
       renderUI();
       return;
     }
@@ -1281,7 +1402,6 @@ function main(): void {
       state.selectedIndex = 0;
       syncNotesWindowItems(notesViewport);
       notesList.select(0);
-      notesList.scrollTo(0);
       return;
     }
 
@@ -1292,10 +1412,8 @@ function main(): void {
     if (totalWindowItems > 0) {
       const localIndex = Math.max(0, Math.min(totalWindowItems - 1, state.selectedIndex - notesWindowStart));
       notesList.select(localIndex);
-      notesList.scrollTo(localIndex);
     } else {
       notesList.select(0);
-      notesList.scrollTo(0);
     }
   }
 
@@ -1403,18 +1521,20 @@ function main(): void {
       cached.activeBodyIndex === state.details.activeBodyIndex &&
       cached.hardLinks === state.details.hardLinks &&
       cached.softLinks === state.details.softLinks &&
+      cached.pendingNoteTitle === pendingNoteTitle &&
       cached.bodyTextWidth === bodyTextWidth &&
       cached.themeName === state.theme
     ) {
       return cached.render;
     }
 
-    const render = buildBodyRender(state.details, bodyTextWidth, theme);
+    const render = buildBodyRender(state.details, bodyTextWidth, theme, pendingNoteTitle);
     bodyRenderCache = {
       openedNote: state.details.openedNote,
       activeBodyIndex: state.details.activeBodyIndex,
       hardLinks: state.details.hardLinks,
       softLinks: state.details.softLinks,
+      pendingNoteTitle,
       bodyTextWidth,
       themeName: state.theme,
       render
@@ -1459,9 +1579,11 @@ function main(): void {
     bodyList.style.item = { fg: theme.bodyItemFg, bg: theme.bodyBg };
 
     const selected = getSelectedNote();
+    const notesMetric = state.searchQuery ? `${state.notes.length}/${allNotes.length}` : `${state.notes.length}`;
+    const searchMetric = state.searchQuery ? `  filter="${state.searchQuery}"` : "";
     header.setContent(
       truncateForWidth(
-        `mimex TUI  theme=${state.theme}  workspace=${defaultWorkspace}  notes=${state.notes.length}  ${state.includeArchived ? "all" : "active"}  ${isBusy ? "busy" : "ready"}`,
+        `mimex TUI  theme=${state.theme}  workspace=${defaultWorkspace}  notes=${notesMetric}  ${state.includeArchived ? "all" : "active"}${searchMetric}  ${isBusy ? "busy" : "ready"}`,
         cols
       )
     );
@@ -1600,6 +1722,7 @@ function main(): void {
           state.selectedIndex = 0;
           const noteId = state.notes[0]?.id;
           if (noteId) {
+            rememberUnfilteredSelection(noteId);
             const cached = detailsCache.get(noteId);
             if (cached) {
               applyResolvedDetails(cached);
@@ -1607,6 +1730,8 @@ function main(): void {
             } else {
               const token = detailLoadToken + 1;
               detailLoadToken = token;
+              setPendingNoteDetails(state.notes[0] ?? null);
+              renderUI();
               void loadDetails(noteId, token);
             }
           }
@@ -1628,6 +1753,7 @@ function main(): void {
           state.selectedIndex = state.notes.length - 1;
           const noteId = state.notes[state.selectedIndex]?.id;
           if (noteId) {
+            rememberUnfilteredSelection(noteId);
             const cached = detailsCache.get(noteId);
             if (cached) {
               applyResolvedDetails(cached);
@@ -1635,6 +1761,8 @@ function main(): void {
             } else {
               const token = detailLoadToken + 1;
               detailLoadToken = token;
+              setPendingNoteDetails(state.notes[state.selectedIndex] ?? null);
+              renderUI();
               void loadDetails(noteId, token);
             }
           }
@@ -1665,7 +1793,7 @@ function main(): void {
     }
 
     if (ch === "/") {
-      enterInputMode("search", "Search mode");
+      enterInputMode("search", "Search mode (blank clears filter)");
       return;
     }
 
