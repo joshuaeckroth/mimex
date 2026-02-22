@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -132,6 +132,27 @@ describe("MimexCore", () => {
     });
 
     expect(updated.bodies[0]?.markdown).toBe("after edit");
+  });
+
+  it("persists notes cache to configured cacheDir", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "mimex-core-test-"));
+    const cacheDir = await mkdtemp(path.join(os.tmpdir(), "mimex-core-cache-test-"));
+    tempDirs.push(workspace, cacheDir);
+
+    const core = new MimexCore(workspace, {
+      autoCommit: false,
+      cacheDir,
+      cacheMaxAgeMs: 60_000
+    });
+    await core.init();
+    await core.createNote({ title: "Cached Note", markdown: "body" });
+    await core.listNotes({ includeArchived: true });
+
+    const cacheBuckets = (await readdir(cacheDir, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    expect(cacheBuckets.length).toBeGreaterThan(0);
+
+    const bucketFiles = await readdir(path.join(cacheDir, cacheBuckets[0]?.name ?? ""));
+    expect(bucketFiles).toContain("core-cache.json");
   });
 });
 

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type {
@@ -21,6 +22,14 @@ import type {
 const NOTES_DIR = "notes";
 const SYSTEM_DIR = ".mimex";
 const SOFTLINKS_FILE = "softlinks.json";
+const CORE_CACHE_VERSION = 1;
+
+interface CoreCacheSnapshot {
+  version: number;
+  workspacePath: string;
+  savedAt: string;
+  notesAll: NoteMeta[];
+}
 
 interface SoftLinkStore {
   edges: Record<string, Record<string, number>>;
@@ -29,34 +38,59 @@ interface SoftLinkStore {
 
 export interface MimexCoreOptions {
   autoCommit?: boolean;
+  cacheDir?: string;
+  cacheMaxAgeMs?: number;
 }
 
 export class MimexCore {
   private readonly workspacePath: string;
   private readonly autoCommit: boolean;
+  private readonly cacheDir: string;
+  private readonly cacheFilePath: string;
+  private readonly cacheMaxAgeMs: number;
+  private initPromise: Promise<void> | null = null;
+  private notesAllCache: NoteMeta[] | null = null;
+  private notesCacheLoadedAtMs = 0;
+  private notesByIdCache = new Map<string, NoteMeta>();
+  private notesByTitleCache = new Map<string, NoteMeta>();
+  private softLinkStoreCache: SoftLinkStore | null = null;
+  private topSoftLinksCache = new Map<string, SoftLinkTarget[]>();
 
   constructor(workspacePath: string, options: MimexCoreOptions = {}) {
-    this.workspacePath = workspacePath;
+    this.workspacePath = path.resolve(workspacePath);
     this.autoCommit = options.autoCommit ?? true;
+    this.cacheDir = options.cacheDir ?? resolveDefaultCacheDir();
+    this.cacheMaxAgeMs = options.cacheMaxAgeMs ?? 30_000;
+    const workspaceHash = createHash("sha1").update(this.workspacePath).digest("hex").slice(0, 16);
+    this.cacheFilePath = path.join(this.cacheDir, workspaceHash, "core-cache.json");
   }
 
   async init(): Promise<void> {
+    if (this.initPromise) {
+      await this.initPromise;
+      return;
+    }
+
+    this.initPromise = this.initialize();
+    try {
+      await this.initPromise;
+    } catch (error) {
+      this.initPromise = null;
+      throw error;
+    }
+  }
+
+  private async initialize(): Promise<void> {
     await mkdir(this.notesDir(), { recursive: true });
     await mkdir(this.systemDir(), { recursive: true });
     await this.ensureGitRepo();
+    await this.loadNotesCacheFromDisk();
   }
 
   async listNotes(options: NoteQueryOptions = {}): Promise<NoteMeta[]> {
     await this.init();
-    const noteDirs = await this.getNoteDirectories();
-    const notes: NoteMeta[] = [];
-
-    for (const noteDir of noteDirs) {
-      const note = await this.readNoteMeta(noteDir);
-      if (note) {
-        notes.push(note);
-      }
-    }
+    await this.ensureNotesCache();
+    const notes = this.notesAllCache ?? [];
 
     const includeArchived = options.includeArchived ?? false;
 
@@ -109,6 +143,8 @@ export class MimexCore {
 
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: create ${title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
     return this.getNote(note.id);
   }
 
@@ -132,6 +168,8 @@ export class MimexCore {
     await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: add body ${note.title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
 
     return this.getNote(note.id);
   }
@@ -159,6 +197,8 @@ export class MimexCore {
     await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: update body ${note.title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
 
     return this.getNote(note.id);
   }
@@ -178,6 +218,8 @@ export class MimexCore {
     note.updatedAt = note.archivedAt;
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: archive ${note.title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
     return this.getNote(note.id);
   }
 
@@ -196,6 +238,8 @@ export class MimexCore {
     note.updatedAt = new Date().toISOString();
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: restore ${note.title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
     return this.getNote(note.id);
   }
 
@@ -239,6 +283,10 @@ export class MimexCore {
     }
 
     await this.autoCommitWorkspace(`note: delete ${note.title}`);
+    this.removeCachedNote(note.id);
+    this.softLinkStoreCache = store;
+    this.topSoftLinksCache.clear();
+    void this.persistNotesCache();
     return note;
   }
 
@@ -250,12 +298,7 @@ export class MimexCore {
       throw new Error(`note not found: ${noteRef}`);
     }
 
-    const bodies: NoteBody[] = [];
-
-    for (const bodyMeta of note.bodies) {
-      const markdown = await readFile(path.join(this.bodiesDir(note.id), `${bodyMeta.id}.md`), "utf8");
-      bodies.push({ ...bodyMeta, markdown });
-    }
+    const bodies = await this.readBodies(note.id, note.bodies);
 
     return { note, bodies };
   }
@@ -378,6 +421,12 @@ export class MimexCore {
       throw new Error(`note not found: ${noteRef}`);
     }
 
+    const cacheKey = `${note.id}:${limit}`;
+    const cached = this.topSoftLinksCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const store = await this.readSoftLinkStore();
     const srcEdges = store.edges[note.id] ?? {};
     const entries = Object.entries(srcEdges)
@@ -388,11 +437,13 @@ export class MimexCore {
     const allNotes = await this.listNotes({ includeArchived: true });
     const titleById = new Map(allNotes.map((n) => [n.id, n.title]));
 
-    return entries.map((entry) => ({
+    const resolved = entries.map((entry) => ({
       noteId: entry.noteId,
       title: titleById.get(entry.noteId) ?? entry.noteId,
       weight: entry.weight
     }));
+    this.topSoftLinksCache.set(cacheKey, resolved);
+    return resolved;
   }
 
   private async incrementSoftLink(src: string, dst: string, reason: "hard" | "search"): Promise<void> {
@@ -415,43 +466,164 @@ export class MimexCore {
 
     await writeFile(this.softLinksPath(), JSON.stringify(store, null, 2), "utf8");
     await this.autoCommitWorkspace(`soft-link: ${src} -> ${dst}`);
+    this.softLinkStoreCache = store;
+    this.topSoftLinksCache.clear();
   }
 
   private async readSoftLinkStore(): Promise<SoftLinkStore> {
+    if (this.softLinkStoreCache) {
+      return this.softLinkStoreCache;
+    }
+
     const filePath = this.softLinksPath();
     try {
       const content = await readFile(filePath, "utf8");
       const parsed = JSON.parse(content) as SoftLinkStore;
       parsed.edges ??= {};
       parsed.events ??= [];
+      this.softLinkStoreCache = parsed;
       return parsed;
     } catch {
-      return { edges: {}, events: [] };
+      const empty = { edges: {}, events: [] };
+      this.softLinkStoreCache = empty;
+      return empty;
     }
   }
 
   private async readBodies(noteId: string, bodyMetas: NoteBodyMeta[]): Promise<NoteBody[]> {
-    const out: NoteBody[] = [];
-    for (const bodyMeta of bodyMetas) {
-      const markdown = await readFile(path.join(this.bodiesDir(noteId), `${bodyMeta.id}.md`), "utf8");
-      out.push({ ...bodyMeta, markdown });
+    return Promise.all(
+      bodyMetas.map(async (bodyMeta) => {
+        const markdown = await readFile(path.join(this.bodiesDir(noteId), `${bodyMeta.id}.md`), "utf8");
+        return { ...bodyMeta, markdown };
+      })
+    );
+  }
+
+  private async ensureNotesCache(): Promise<void> {
+    if (this.notesAllCache) {
+      if (this.cacheMaxAgeMs <= 0) {
+        return;
+      }
+      if (Date.now() - this.notesCacheLoadedAtMs < this.cacheMaxAgeMs) {
+        return;
+      }
     }
-    return out;
+
+    if (this.notesAllCache && this.cacheMaxAgeMs > 0) {
+      await this.refreshNotesCacheFromWorkspace();
+      return;
+    }
+
+    await this.refreshNotesCacheFromWorkspace();
+  }
+
+  private async loadNotesCacheFromDisk(): Promise<void> {
+    try {
+      const raw = await readFile(this.cacheFilePath, "utf8");
+      const parsed = JSON.parse(raw) as CoreCacheSnapshot;
+      if (parsed.version !== CORE_CACHE_VERSION || parsed.workspacePath !== this.workspacePath || !Array.isArray(parsed.notesAll)) {
+        return;
+      }
+
+      const savedAtMs = Date.parse(parsed.savedAt);
+      if (this.cacheMaxAgeMs > 0 && Number.isFinite(savedAtMs)) {
+        const ageMs = Date.now() - savedAtMs;
+        if (ageMs > this.cacheMaxAgeMs) {
+          return;
+        }
+      }
+
+      const normalized = parsed.notesAll.map((note) => normalizeNoteMeta(note));
+      normalized.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      this.primeNoteCaches(normalized);
+    } catch {
+      // cache is best-effort
+    }
+  }
+
+  private async refreshNotesCacheFromWorkspace(): Promise<void> {
+    const noteDirs = await this.getNoteDirectories();
+    const loaded = await Promise.all(noteDirs.map((noteDir) => this.readNoteMeta(noteDir)));
+    const notes = loaded.filter((note): note is NoteMeta => Boolean(note));
+    notes.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    this.primeNoteCaches(notes);
+    await this.persistNotesCache();
+  }
+
+  private primeNoteCaches(notes: NoteMeta[]): void {
+    this.notesAllCache = notes;
+    this.notesCacheLoadedAtMs = Date.now();
+    this.notesByIdCache.clear();
+    this.notesByTitleCache.clear();
+    this.topSoftLinksCache.clear();
+
+    for (const note of notes) {
+      this.notesByIdCache.set(note.id, note);
+      const titleKey = normalizeTitle(note.title);
+      if (!this.notesByTitleCache.has(titleKey)) {
+        this.notesByTitleCache.set(titleKey, note);
+      }
+      for (const alias of note.aliases) {
+        const aliasKey = normalizeTitle(alias);
+        if (!this.notesByTitleCache.has(aliasKey)) {
+          this.notesByTitleCache.set(aliasKey, note);
+        }
+      }
+    }
+  }
+
+  private cacheNoteMeta(note: NoteMeta): void {
+    if (!this.notesAllCache) {
+      return;
+    }
+
+    const current = this.notesAllCache ?? [];
+    const without = current.filter((existing) => existing.id !== note.id);
+    without.push(note);
+    without.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    this.primeNoteCaches(without);
+  }
+
+  private removeCachedNote(noteId: string): void {
+    if (!this.notesAllCache) {
+      return;
+    }
+
+    const current = this.notesAllCache ?? [];
+    const next = current.filter((existing) => existing.id !== noteId);
+    this.primeNoteCaches(next);
+  }
+
+  private async persistNotesCache(): Promise<void> {
+    if (!this.notesAllCache) {
+      return;
+    }
+
+    const payload: CoreCacheSnapshot = {
+      version: CORE_CACHE_VERSION,
+      workspacePath: this.workspacePath,
+      savedAt: new Date().toISOString(),
+      notesAll: this.notesAllCache
+    };
+
+    try {
+      await mkdir(path.dirname(this.cacheFilePath), { recursive: true });
+      await writeFile(this.cacheFilePath, JSON.stringify(payload), "utf8");
+    } catch {
+      // cache is best-effort
+    }
   }
 
   private async findNoteByTitle(title: string, options: NoteQueryOptions = {}): Promise<NoteMeta | null> {
-    const notes = await this.listNotes(options);
     const wanted = normalizeTitle(title);
-
-    for (const note of notes) {
-      if (normalizeTitle(note.title) === wanted) {
-        return note;
-      }
-      if (note.aliases.some((alias) => normalizeTitle(alias) === wanted)) {
-        return note;
-      }
+    await this.ensureNotesCache();
+    const matched = this.notesByTitleCache.get(wanted) ?? null;
+    if (!matched) {
+      return null;
     }
-
+    if ((options.includeArchived ?? false) || !isArchived(matched)) {
+      return matched;
+    }
     return null;
   }
 
@@ -460,13 +632,19 @@ export class MimexCore {
     if (!trimmed) {
       return null;
     }
+    await this.ensureNotesCache();
 
-    const byId = await this.readNoteMeta(trimmed);
+    const byId = this.notesByIdCache.get(trimmed);
     if (byId && ((options.includeArchived ?? false) || !isArchived(byId))) {
       return byId;
     }
 
-    return this.findNoteByTitle(trimmed, options);
+    const byTitle = this.notesByTitleCache.get(normalizeTitle(trimmed));
+    if (byTitle && ((options.includeArchived ?? false) || !isArchived(byTitle))) {
+      return byTitle;
+    }
+
+    return null;
   }
 
   private async createUniqueNoteId(title: string): Promise<string> {
@@ -497,11 +675,7 @@ export class MimexCore {
   private async readNoteMeta(noteId: string): Promise<NoteMeta | null> {
     try {
       const raw = await readFile(path.join(this.noteDir(noteId), "note.json"), "utf8");
-      const parsed = JSON.parse(raw) as NoteMeta;
-      parsed.aliases ??= [];
-      parsed.bodies ??= [];
-      parsed.archivedAt ??= null;
-      return parsed;
+      return normalizeNoteMeta(JSON.parse(raw) as NoteMeta);
     } catch {
       return null;
     }
@@ -628,6 +802,31 @@ function slugify(input: string): string {
 
 function isArchived(note: NoteMeta): boolean {
   return Boolean(note.archivedAt);
+}
+
+function normalizeNoteMeta(note: NoteMeta): NoteMeta {
+  const aliases = (note.aliases ?? []).map((alias) => alias.trim()).filter((alias) => alias.length > 0);
+  const bodies = (note.bodies ?? []).map((body) => ({
+    ...body,
+    label: body.label ?? "body",
+    createdAt: body.createdAt ?? note.createdAt,
+    updatedAt: body.updatedAt ?? note.updatedAt
+  }));
+
+  return {
+    ...note,
+    aliases,
+    bodies,
+    archivedAt: note.archivedAt ?? null
+  };
+}
+
+function resolveDefaultCacheDir(): string {
+  const xdg = process.env.XDG_CACHE_HOME?.trim();
+  if (xdg) {
+    return path.join(xdg, "mimex");
+  }
+  return path.join(os.homedir(), ".cache", "mimex");
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
