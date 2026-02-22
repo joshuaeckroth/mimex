@@ -1325,7 +1325,15 @@ function main(): void {
     }
 
     if (currentMode === "search") {
+      const sourceNoteId = state.details.openedNote?.note.id ?? null;
       const previousSearchQuery = state.searchQuery;
+      if (value && sourceNoteId) {
+        try {
+          await core.followLink(sourceNoteId, value);
+        } catch {
+          // keep search UX responsive even if soft-link update fails
+        }
+      }
       if (!value) {
         const restoreId = unfilteredSelectedNoteId ?? undefined;
         state.searchQuery = "";
