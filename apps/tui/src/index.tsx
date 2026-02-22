@@ -67,6 +67,7 @@ interface BodyRenderCache {
   hardLinks: HardLink[];
   softLinks: SoftLinkTarget[];
   pendingNoteTitle: string | null;
+  includeSoftSummary: boolean;
   bodyTextWidth: number;
   themeName: ThemeName;
   render: BodyRender;
@@ -74,6 +75,7 @@ interface BodyRenderCache {
 
 interface TuiState {
   theme: ThemeName;
+  wideSoftLinks: boolean;
   includeArchived: boolean;
   searchQuery: string;
   notes: NoteMeta[];
@@ -116,7 +118,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
+  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 
@@ -518,11 +520,45 @@ function renderBodyBreakMarker(
   return `${left}${right}`;
 }
 
+function renderSoftLinkCell(link: SoftLinkTarget, index: number, width: number): string {
+  const numbered = `${index + 1}. ${link.title} (${link.weight})`;
+  return truncateForWidth(numbered, Math.max(6, width)).padEnd(Math.max(6, width), " ");
+}
+
+function buildSoftLinksGrid(softLinks: SoftLinkTarget[], width: number): string[] {
+  const safeWidth = Math.max(8, width);
+  const top = softLinks.slice(0, 10);
+  if (top.length === 0) {
+    return ["(none)"];
+  }
+
+  if (safeWidth < 40) {
+    return top.map((link, index) => truncateForWidth(`${index + 1}. ${link.title} (${link.weight})`, safeWidth));
+  }
+
+  const gap = "  ";
+  const colWidth = Math.max(10, Math.floor((safeWidth - gap.length) / 2));
+  const lines: string[] = [];
+  for (let i = 0; i < top.length; i += 2) {
+    const left = renderSoftLinkCell(top[i] as SoftLinkTarget, i, colWidth);
+    const rightLink = top[i + 1];
+    if (!rightLink) {
+      lines.push(left.trimEnd());
+      continue;
+    }
+    const right = renderSoftLinkCell(rightLink, i + 1, colWidth);
+    lines.push(`${left}${gap}${right}`);
+  }
+
+  return lines;
+}
+
 function buildBodyRender(
   details: NoteDetailsState,
   bodyTextWidth: number,
   theme: ThemePalette,
-  pendingNoteTitle: string | null
+  pendingNoteTitle: string | null,
+  includeSoftSummary: boolean
 ): BodyRender {
   const { openedNote, activeBodyIndex, hardLinks, softLinks } = details;
 
@@ -536,7 +572,7 @@ function buildBodyRender(
     }
 
     return {
-      lines: ["Select a note.", "", "Hard links: 0", "Top soft: (none)"],
+      lines: includeSoftSummary ? ["Select a note.", "", "Hard links: 0", "Top soft: (none)"] : ["Select a note.", "", "Hard links: 0"],
       bodyStarts: [],
       hardLinkHits: []
     };
@@ -580,15 +616,17 @@ function buildBodyRender(
     lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
   }
 
-  const softSummary =
-    softLinks.length === 0
-      ? "Top soft: (none)"
-      : `Top soft: ${softLinks
-          .slice(0, 8)
-          .map((link) => `${link.title} (${link.weight})`)
-          .join(", ")}`;
-  for (const wrapped of wrapToWidth(softSummary, bodyTextWidth)) {
-    lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
+  if (includeSoftSummary) {
+    const softSummary =
+      softLinks.length === 0
+        ? "Top soft: (none)"
+        : `Top soft: ${softLinks
+            .slice(0, 8)
+            .map((link) => `${link.title} (${link.weight})`)
+            .join(", ")}`;
+    for (const wrapped of wrapToWidth(softSummary, bodyTextWidth)) {
+      lines.push(colorizeLine(escapeBlessedTags(wrapped), theme.mdMetaFg));
+    }
   }
 
   return { lines, bodyStarts, hardLinkHits };
@@ -600,6 +638,7 @@ function main(): void {
 
   const state: TuiState = {
     theme: resolveInitialTheme(THEME_ENV),
+    wideSoftLinks: false,
     includeArchived: false,
     searchQuery: "",
     notes: [],
@@ -633,6 +672,8 @@ function main(): void {
   let bodyWindowStart = 0;
   let bodyWindowEnd = 0;
   let lastBodyViewport = 1;
+  let lastWideSoftLinksVisible = false;
+  let lastSoftLinksTextWidth = 0;
 
   const screen = blessed.screen({
     smartCSR: true,
@@ -701,6 +742,22 @@ function main(): void {
     }
   });
 
+  const softLinksBox = blessed.box({
+    top: 1,
+    left: 120,
+    width: 30,
+    height: 20,
+    border: "line",
+    label: " Soft Links ",
+    tags: false,
+    hidden: true,
+    style: {
+      bg: THEMES[state.theme].bodyBg,
+      fg: THEMES[state.theme].bodyItemFg,
+      border: { fg: THEMES[state.theme].borderBlurred }
+    }
+  });
+
   const footer = blessed.box({
     bottom: 0,
     left: 0,
@@ -716,6 +773,7 @@ function main(): void {
   screen.append(header);
   screen.append(notesList);
   screen.append(bodyList);
+  screen.append(softLinksBox);
   screen.append(footer);
 
   function getTerminalRows(): number {
@@ -1365,7 +1423,22 @@ function main(): void {
   function applyPaneChrome(theme: ThemePalette): void {
     notesList.style.border = { fg: state.focusPane === "notes" ? theme.borderFocused : theme.borderBlurred };
     bodyList.style.border = { fg: state.focusPane === "bodies" ? theme.borderFocused : theme.borderBlurred };
+    softLinksBox.style.border = { fg: state.focusPane === "bodies" ? theme.borderFocused : theme.borderBlurred };
     notesList.setLabel(` Notes${state.focusPane === "notes" ? " (focus)" : ""} `);
+  }
+
+  function updateSoftLinksWideDisplay(visible: boolean, textWidth: number): void {
+    softLinksBox.hidden = !visible;
+    if (!visible) {
+      return;
+    }
+
+    const links = state.details.softLinks.slice(0, 10);
+    const lines = buildSoftLinksGrid(links, textWidth);
+    softLinksBox.setContent(lines.join("\n"));
+    softLinksBox.setLabel(
+      ` Soft Links${state.focusPane === "bodies" ? " (focus)" : ""} ${links.length}/${state.details.softLinks.length} `
+    );
   }
 
   function resolveNotesWindow(totalItems: number, viewportItems: number, selectedIndex: number): { start: number; end: number } {
@@ -1518,6 +1591,7 @@ function main(): void {
     const theme = THEMES[state.theme];
     applyPaneChrome(theme);
     updateBodyViewportDisplay();
+    updateSoftLinksWideDisplay(lastWideSoftLinksVisible, lastSoftLinksTextWidth);
 
     const cols = Math.max(80, getTerminalCols());
     setFooterContent(cols);
@@ -1532,7 +1606,7 @@ function main(): void {
     screen.render();
   }
 
-  function resolveBodyRender(bodyTextWidth: number, theme: ThemePalette): BodyRender {
+  function resolveBodyRender(bodyTextWidth: number, theme: ThemePalette, includeSoftSummary: boolean): BodyRender {
     const cached = bodyRenderCache;
     if (
       cached &&
@@ -1541,19 +1615,21 @@ function main(): void {
       cached.hardLinks === state.details.hardLinks &&
       cached.softLinks === state.details.softLinks &&
       cached.pendingNoteTitle === pendingNoteTitle &&
+      cached.includeSoftSummary === includeSoftSummary &&
       cached.bodyTextWidth === bodyTextWidth &&
       cached.themeName === state.theme
     ) {
       return cached.render;
     }
 
-    const render = buildBodyRender(state.details, bodyTextWidth, theme, pendingNoteTitle);
+    const render = buildBodyRender(state.details, bodyTextWidth, theme, pendingNoteTitle, includeSoftSummary);
     bodyRenderCache = {
       openedNote: state.details.openedNote,
       activeBodyIndex: state.details.activeBodyIndex,
       hardLinks: state.details.hardLinks,
       softLinks: state.details.softLinks,
       pendingNoteTitle,
+      includeSoftSummary,
       bodyTextWidth,
       themeName: state.theme,
       render
@@ -1569,7 +1645,17 @@ function main(): void {
     const footerHeight = 2;
     const contentHeight = Math.max(6, rows - 1 - footerHeight);
     const notesWidth = Math.max(30, Math.floor(cols * 0.42));
-    const bodyWidth = Math.max(40, cols - notesWidth);
+    const bodyPaneWidth = Math.max(40, cols - notesWidth);
+    let softLinksPaneWidth = 0;
+    if (state.wideSoftLinks) {
+      const desired = Math.max(20, Math.min(42, Math.floor(bodyPaneWidth * 0.34)));
+      softLinksPaneWidth = desired;
+      if (bodyPaneWidth - softLinksPaneWidth < 24) {
+        softLinksPaneWidth = Math.max(0, bodyPaneWidth - 24);
+      }
+    }
+    const wideSoftLinksVisible = softLinksPaneWidth > 0;
+    const bodyWidth = Math.max(24, bodyPaneWidth - softLinksPaneWidth);
 
     header.width = cols;
 
@@ -1582,6 +1668,11 @@ function main(): void {
     bodyList.left = notesWidth;
     bodyList.width = bodyWidth;
     bodyList.height = contentHeight;
+
+    softLinksBox.top = 1;
+    softLinksBox.left = notesWidth + bodyWidth;
+    softLinksBox.width = Math.max(1, softLinksPaneWidth);
+    softLinksBox.height = contentHeight;
 
     footer.height = footerHeight;
     footer.width = cols;
@@ -1596,6 +1687,8 @@ function main(): void {
     bodyList.style.selected = { fg: theme.bodySelectedFg, bg: theme.bodySelectedBg };
     notesList.style.item = { fg: theme.notesItemFg, bg: theme.notesBg };
     bodyList.style.item = { fg: theme.bodyItemFg, bg: theme.bodyBg };
+    softLinksBox.style.bg = theme.bodyBg;
+    softLinksBox.style.fg = theme.bodyItemFg;
 
     const selected = getSelectedNote();
     const notesMetric = state.searchQuery ? `${state.notes.length}/${allNotes.length}` : `${state.notes.length}`;
@@ -1611,10 +1704,14 @@ function main(): void {
     updateNotesViewportDisplay();
 
     const bodyTextWidth = Math.max(20, bodyWidth - 4);
-    const bodyRender = resolveBodyRender(bodyTextWidth, theme);
+    const bodyRender = resolveBodyRender(bodyTextWidth, theme, !wideSoftLinksVisible);
     lastBodyRender = bodyRender;
 
     updateBodyViewportDisplay();
+    const softLinksTextWidth = Math.max(8, softLinksPaneWidth - 2);
+    lastWideSoftLinksVisible = wideSoftLinksVisible;
+    lastSoftLinksTextWidth = softLinksTextWidth;
+    updateSoftLinksWideDisplay(wideSoftLinksVisible, softLinksTextWidth);
     setFooterContent(cols);
 
     if (selected) {
@@ -1841,6 +1938,13 @@ function main(): void {
     if (ch === "t") {
       state.theme = state.theme === "dark" ? "light" : "dark";
       setStatus(`Theme: ${state.theme}`);
+      renderUI();
+      return;
+    }
+
+    if (ch === "w") {
+      state.wideSoftLinks = !state.wideSoftLinks;
+      setStatus(`Wide soft links: ${state.wideSoftLinks ? "on" : "off"}`);
       renderUI();
       return;
     }
