@@ -1,12 +1,29 @@
 :root {
   --bg: #e9e9e9;
   --panel: #f6f6f6;
-  --ink: #111;
-  --muted: #5c5c5c;
+  --panel-strong: #e2e2e2;
+  --editor-bg: #ffffff;
+  --ink: #111111;
+  --muted: #575757;
   --line: #2f2f2f;
   --line-soft: #9b9b9b;
   --active: #d9d9d9;
-  --error: #3d0f0f;
+  --error: #4a1717;
+  --overlay: rgba(20, 20, 20, 0.42);
+}
+
+body[data-theme="dark"] {
+  --bg: #151515;
+  --panel: #1d1d1d;
+  --panel-strong: #272727;
+  --editor-bg: #131313;
+  --ink: #e8e8e8;
+  --muted: #a9a9a9;
+  --line: #b8b8b8;
+  --line-soft: #696969;
+  --active: #303030;
+  --error: #ffb4b4;
+  --overlay: rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -17,29 +34,42 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--ink);
   font-family: "IBM Plex Mono", "Iosevka", "Cascadia Mono", monospace;
 }
 
 .app-shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   padding: 0.75rem;
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto 1fr;
   gap: 0.75rem;
+  overflow: visible;
+  position: relative;
 }
 
 .topbar,
 .controls,
 .status-row,
-.pane {
+.pane,
+.sidebar-close-btn {
   border: 2px solid var(--line);
   background: var(--panel);
 }
 
 .topbar {
-  padding: 0.6rem 0.8rem;
+  padding: 0.55rem 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.topbar-main {
+  min-width: 0;
 }
 
 .topbar h1 {
@@ -51,7 +81,14 @@ body {
 .topbar p {
   margin: 0.2rem 0 0;
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
+}
+
+.topbar-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .controls {
@@ -71,16 +108,18 @@ body {
 }
 
 .controls input[type="text"],
-.controls input[type="search"] {
+.controls input[type="search"],
+.body-editor {
   width: 100%;
   padding: 0.5rem 0.55rem;
   border: 2px solid var(--line-soft);
-  background: #fff;
+  background: var(--editor-bg);
   color: var(--ink);
   font: inherit;
 }
 
-.controls input:focus {
+.controls input:focus,
+.body-editor:focus {
   outline: none;
   border-color: var(--line);
 }
@@ -96,21 +135,30 @@ body {
 
 button {
   border: 2px solid var(--line);
-  background: #d5d5d5;
+  background: var(--panel-strong);
   color: var(--ink);
   font: inherit;
-  padding: 0.5rem 0.7rem;
+  padding: 0.46rem 0.65rem;
   text-transform: lowercase;
   cursor: pointer;
 }
 
 button:hover {
-  background: #cbcbcb;
+  filter: brightness(0.95);
 }
 
 button:focus-visible {
   outline: 2px dashed var(--line);
   outline-offset: 1px;
+}
+
+button[disabled] {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.topbar-btn.active {
+  background: var(--active);
 }
 
 .status-row {
@@ -122,30 +170,64 @@ button:focus-visible {
   color: var(--error);
 }
 
+.sidebar-close-btn {
+  display: none;
+  text-align: center;
+}
+
+.sidebar-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay);
+  z-index: 25;
+}
+
 .panes {
   min-height: 0;
+  height: auto;
   display: grid;
-  grid-template-columns: minmax(16rem, 24rem) minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: 0.75rem;
+  position: relative;
+  align-items: start;
 }
 
 .pane {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto;
+  align-content: start;
+}
+
+.app-shell.focus-notes .pane-list,
+.app-shell.focus-body .pane-detail {
+  border-color: var(--line);
+}
+
+.pane-list {
+  display: none;
+}
+
+.app-shell.wide .panes {
+  grid-template-columns: minmax(16rem, 24rem) minmax(0, 1fr);
+}
+
+.app-shell.wide .pane-list {
+  display: grid;
 }
 
 .pane-title {
   padding: 0.4rem 0.55rem;
   border-bottom: 2px solid var(--line);
-  background: #dcdcdc;
+  background: var(--panel-strong);
   text-transform: uppercase;
   font-size: 0.75rem;
   letter-spacing: 0.09em;
 }
 
 .note-list {
-  overflow: auto;
+  overflow-y: auto;
+  max-height: calc(100dvh - 16rem);
 }
 
 .note-row {
@@ -161,7 +243,7 @@ button:focus-visible {
 }
 
 .note-row:hover {
-  background: #ececec;
+  background: var(--active);
 }
 
 .note-row.active {
@@ -181,7 +263,7 @@ button:focus-visible {
 }
 
 .note-detail {
-  overflow: auto;
+  overflow: visible;
   padding: 0.75rem;
   display: grid;
   align-content: start;
@@ -194,7 +276,7 @@ button:focus-visible {
 
 .detail-head h2 {
   margin: 0;
-  font-size: 1.12rem;
+  font-size: 1.1rem;
   line-height: 1.2;
 }
 
@@ -206,16 +288,27 @@ button:focus-visible {
 
 .body-card {
   border: 2px solid var(--line-soft);
-  background: #fcfcfc;
+  background: var(--panel);
+}
+
+.body-card.active {
+  border-color: var(--line);
 }
 
 .body-label {
   border-bottom: 1px solid var(--line-soft);
-  background: #ececec;
+  background: var(--panel-strong);
   padding: 0.32rem 0.45rem;
   font-size: 0.7rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  cursor: pointer;
+}
+
+.body-editor-wrap {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.5rem;
 }
 
 .body-markdown {
@@ -224,9 +317,39 @@ button:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  line-height: 1.33;
-  font-family: inherit;
+  line-height: 1.35;
   font-size: 0.86rem;
+}
+
+.body-markdown a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+}
+
+.body-markdown a.internal-link {
+  font-weight: 700;
+}
+
+.body-editor {
+  min-height: 11rem;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+  font-size: 0.86rem;
+}
+
+.body-actions {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.body-state {
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .empty-msg {
@@ -235,31 +358,67 @@ button:focus-visible {
 }
 
 @media (max-width: 900px) {
+  .app-shell {
+    padding: 0.55rem;
+    gap: 0.55rem;
+  }
+
   .controls {
     grid-template-columns: 1fr;
   }
 
-  .panes {
+  .app-shell.wide .panes {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(12rem, 42vh) minmax(18rem, 1fr);
   }
 
-  .pane-list,
   .pane-detail {
     min-height: 0;
+  }
+
+  .pane-list {
+    display: grid;
+    position: absolute;
+    top: var(--mobile-drawer-top, 3.2rem);
+    left: var(--mobile-drawer-left, 0.55rem);
+    bottom: auto;
+    width: min(86vw, 24rem);
+    height: min(72dvh, calc(100dvh - var(--mobile-drawer-top, 3.2rem) - 0.8rem));
+    z-index: 30;
+    transform: translateX(-105%);
+    transition: transform 130ms linear;
+  }
+
+  .note-list {
+    max-height: 100%;
+  }
+
+  .app-shell.sidebar-open .pane-list {
+    transform: translateX(0);
+  }
+
+  .sidebar-close-btn {
+    display: none;
+    position: absolute;
+    top: calc(var(--mobile-drawer-top, 3.2rem) + 0.45rem);
+    right: 0.95rem;
+    z-index: 35;
+  }
+
+  .app-shell.sidebar-open .sidebar-close-btn {
+    display: inline-flex;
+  }
+
+  .note-detail {
+    padding: 0.6rem;
   }
 }
 
 @media (max-width: 520px) {
-  .app-shell {
-    padding: 0.5rem;
-    gap: 0.5rem;
-  }
-
   .topbar,
   .controls,
   .status-row,
-  .pane {
+  .pane,
+  .sidebar-close-btn {
     border-width: 1px;
   }
 
@@ -267,15 +426,24 @@ button:focus-visible {
     border-bottom-width: 1px;
   }
 
-  .topbar h1 {
-    font-size: 0.98rem;
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .topbar-btn {
+    flex: 1 1 auto;
   }
 
   .note-title {
     font-size: 0.84rem;
   }
 
-  .body-markdown {
+  .body-editor {
     font-size: 0.82rem;
   }
 }

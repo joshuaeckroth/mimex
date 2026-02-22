@@ -9,8 +9,15 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <h1>MIMEX</h1>
-        <p>Minimal note explorer</p>
+        <div class="topbar-main">
+          <h1>MIMEX</h1>
+          <p>Minimal note explorer</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="toggleNotesBtn" type="button" class="topbar-btn" aria-expanded="false">notes</button>
+          <button id="toggleWideBtn" type="button" class="topbar-btn" aria-pressed="true">wide</button>
+          <button id="toggleThemeBtn" type="button" class="topbar-btn" aria-pressed="false">dark</button>
+        </div>
       </header>
 
       <section class="controls" aria-label="controls">
@@ -32,6 +39,9 @@
       <section class="status-row" aria-live="polite">
         <span id="statusText">Ready.</span>
       </section>
+
+      <button id="closeSidebarBtn" type="button" class="sidebar-close-btn">close notes</button>
+      <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
 
       <main class="panes">
         <aside class="pane pane-list" aria-label="notes">

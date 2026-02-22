@@ -180,6 +180,18 @@ app.post("/api/notes/:noteRef/restore", async (request, reply) => {
   }
 });
 
+app.delete("/api/notes/:noteRef", async (request, reply) => {
+  const core = await getCore(request.headers["x-user-id"] as string | undefined);
+  const params = z.object({ noteRef: z.string().min(1) }).parse(request.params);
+
+  try {
+    const note = await core.deleteNote(params.noteRef);
+    return reply.code(200).send(note);
+  } catch (error) {
+    return reply.code(404).send({ error: (error as Error).message });
+  }
+});
+
 app.post("/api/follow-link", async (request, reply) => {
   const core = await getCore(request.headers["x-user-id"] as string | undefined);
   const parsed = followLinkSchema.safeParse(request.body);
