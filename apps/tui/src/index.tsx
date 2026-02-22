@@ -1327,13 +1327,6 @@ function main(): void {
     if (currentMode === "search") {
       const sourceNoteId = state.details.openedNote?.note.id ?? null;
       const previousSearchQuery = state.searchQuery;
-      if (value && sourceNoteId) {
-        try {
-          await core.followLink(sourceNoteId, value);
-        } catch {
-          // keep search UX responsive even if soft-link update fails
-        }
-      }
       if (!value) {
         const restoreId = unfilteredSelectedNoteId ?? undefined;
         state.searchQuery = "";
@@ -1344,6 +1337,14 @@ function main(): void {
         }
         state.searchQuery = value;
         await refresh(undefined, state.includeArchived, true);
+        const targetNoteId = state.notes[0]?.id ?? null;
+        if (sourceNoteId && targetNoteId && targetNoteId !== sourceNoteId) {
+          try {
+            await core.followLink(sourceNoteId, targetNoteId);
+          } catch {
+            // keep search UX responsive even if soft-link update fails
+          }
+        }
       }
       if (!value) {
         setStatus("Search cleared");

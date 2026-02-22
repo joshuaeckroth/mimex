@@ -144,6 +144,10 @@ export function porcelainNotesList(notes: NoteMeta[]): string {
     .join("\n");
 }
 
+export function porcelainNoteDeleted(note: NoteMeta): string {
+  return ["NOTE_DELETED", note.id, note.title].map(esc).join("\t");
+}
+
 export function porcelainSearch(results: SearchResult[]): string {
   return results
     .map((result, idx) => ["SEARCH", idx + 1, result.noteId, result.title, result.score].map(esc).join("\t"))

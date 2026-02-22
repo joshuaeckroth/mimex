@@ -11,6 +11,7 @@ import {
   porcelainFollowResult,
   porcelainHardLinks,
   porcelainLinkResolutions,
+  porcelainNoteDeleted,
   porcelainNote,
   porcelainNotesList,
   porcelainSearch,
@@ -289,7 +290,7 @@ program
     await withCore(async (core) => {
       const deleted = await core.deleteNote(noteRef);
       const human = `Deleted ${deleted.title} (${deleted.id})`;
-      const porcelain = ["NOTE_DELETED", deleted.id, deleted.title].join("\t");
+      const porcelain = porcelainNoteDeleted(deleted);
       printOutput(deleted, human, porcelain);
     });
   });

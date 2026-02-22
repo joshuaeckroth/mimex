@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   porcelainFollowResult,
+  porcelainNoteDeleted,
   porcelainNotesList,
   porcelainSoftLinks,
   renderLinkResolutions,
@@ -40,6 +41,19 @@ describe("porcelain output", () => {
   it("emits soft links", () => {
     const out = porcelainSoftLinks([{ noteId: "n1", title: "N1", weight: 3 }]);
     expect(out).toBe("SOFTLINK\tn1\tN1\t3");
+  });
+
+  it("escapes deleted note fields", () => {
+    const out = porcelainNoteDeleted({
+      id: "n1\t2",
+      title: "Line 1\nLine 2",
+      aliases: [],
+      createdAt: "2020-01-01T00:00:00.000Z",
+      updatedAt: "2020-01-01T00:00:00.000Z",
+      archivedAt: null,
+      bodies: []
+    });
+    expect(out).toBe("NOTE_DELETED\tn1 2\tLine 1 Line 2");
   });
 });
 
