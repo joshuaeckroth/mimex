@@ -282,6 +282,19 @@ program
   });
 
 program
+  .command("note:delete")
+  .description("delete a note permanently")
+  .argument("<noteRef>", "note id or title")
+  .action(async (noteRef) => {
+    await withCore(async (core) => {
+      const deleted = await core.deleteNote(noteRef);
+      const human = `Deleted ${deleted.title} (${deleted.id})`;
+      const porcelain = ["NOTE_DELETED", deleted.id, deleted.title].join("\t");
+      printOutput(deleted, human, porcelain);
+    });
+  });
+
+program
   .command("body:add")
   .description("add a body to a note")
   .argument("<noteRef>", "note id or title")
