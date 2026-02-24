@@ -38,6 +38,67 @@ interface SoftLinkStore {
   events: SoftLinkEvent[];
 }
 
+interface SearchTerm {
+  normalized: string;
+  stem: string;
+}
+
+interface ParsedSearchQuery {
+  normalized: string;
+  phrases: string[];
+  terms: SearchTerm[];
+}
+
+interface SearchFieldWeights {
+  exactQuery: number;
+  containsQuery: number;
+  phrase: number;
+  termExact: number;
+  termPartial: number;
+  allTerms: number;
+  proximityMax: number;
+}
+
+interface SearchFieldMatch {
+  score: number;
+  matchedTerms: number;
+}
+
+interface NormalizedTextWithMap {
+  text: string;
+  map: number[];
+}
+
+const TITLE_SEARCH_WEIGHTS: SearchFieldWeights = {
+  exactQuery: 160,
+  containsQuery: 65,
+  phrase: 48,
+  termExact: 24,
+  termPartial: 12,
+  allTerms: 40,
+  proximityMax: 22
+};
+
+const ALIAS_SEARCH_WEIGHTS: SearchFieldWeights = {
+  exactQuery: 90,
+  containsQuery: 40,
+  phrase: 30,
+  termExact: 14,
+  termPartial: 8,
+  allTerms: 22,
+  proximityMax: 12
+};
+
+const BODY_SEARCH_WEIGHTS: SearchFieldWeights = {
+  exactQuery: 55,
+  containsQuery: 24,
+  phrase: 16,
+  termExact: 6,
+  termPartial: 3,
+  allTerms: 10,
+  proximityMax: 8
+};
+
 export interface MimexCoreOptions {
   autoCommit?: boolean;
   cacheDir?: string;
@@ -400,43 +461,30 @@ export class MimexCore {
 
   async searchNotes(query: string, limit = 10, options: NoteQueryOptions = {}): Promise<SearchResult[]> {
     await this.init();
-    const normalizedQuery = query.trim();
-    if (!normalizedQuery) {
+    const parsedQuery = parseSearchQuery(query);
+    if (!parsedQuery.normalized) {
       return [];
     }
 
-    const queryTokens = tokenize(normalizedQuery);
     const notes = await this.listNotes(options);
     const results: SearchResult[] = [];
 
     for (const note of notes) {
-      const titleNorm = normalizeTitle(note.title);
       let score = 0;
-      if (titleNorm === normalizeTitle(normalizedQuery)) {
-        score += 100;
-      }
-
-      if (titleNorm.includes(normalizeTitle(normalizedQuery))) {
-        score += 40;
-      }
-
-      for (const token of queryTokens) {
-        if (titleNorm.includes(token)) {
-          score += 15;
-        }
+      score += scoreSearchField(note.title, parsedQuery, TITLE_SEARCH_WEIGHTS).score;
+      for (const alias of note.aliases) {
+        score += scoreSearchField(alias, parsedQuery, ALIAS_SEARCH_WEIGHTS).score;
       }
 
       let excerpt = "";
+      let bestBodyScore = 0;
       const bodies = await this.readBodies(note.id, note.bodies);
       for (const body of bodies) {
-        const bodyNorm = normalizeTitle(body.markdown);
-        for (const token of queryTokens) {
-          if (bodyNorm.includes(token)) {
-            score += 3;
-            if (!excerpt) {
-              excerpt = this.findExcerpt(body.markdown, token);
-            }
-          }
+        const bodyMatch = scoreSearchField(body.markdown, parsedQuery, BODY_SEARCH_WEIGHTS);
+        score += bodyMatch.score;
+        if (bodyMatch.score > bestBodyScore) {
+          bestBodyScore = bodyMatch.score;
+          excerpt = this.findExcerpt(body.markdown, parsedQuery);
         }
       }
 
@@ -801,14 +849,42 @@ export class MimexCore {
     return [...uniq];
   }
 
-  private findExcerpt(markdown: string, token: string): string {
-    const idx = normalizeTitle(markdown).indexOf(token);
-    if (idx < 0) {
-      return markdown.slice(0, 140);
+  private findExcerpt(markdown: string, query: ParsedSearchQuery): string {
+    const normalized = normalizeSearchTextWithMap(markdown);
+    const needles = [
+      ...query.phrases,
+      ...query.terms.map((term) => term.normalized),
+      ...query.terms.map((term) => term.stem)
+    ].filter(Boolean);
+
+    let bestStart = -1;
+    let bestLength = 0;
+
+    for (const needle of needles) {
+      const idx = normalized.text.indexOf(needle);
+      if (idx < 0) {
+        continue;
+      }
+
+      if (bestStart < 0 || idx < bestStart || (idx === bestStart && needle.length > bestLength)) {
+        bestStart = idx;
+        bestLength = needle.length;
+      }
     }
-    const start = Math.max(0, idx - 40);
-    const end = Math.min(markdown.length, idx + 100);
-    return markdown.slice(start, end).replace(/\s+/g, " ").trim();
+
+    if (bestStart < 0 || normalized.map.length === 0) {
+      return markdown.slice(0, 140).replace(/\s+/g, " ").trim();
+    }
+
+    const normEnd = Math.min(normalized.map.length - 1, bestStart + Math.max(1, bestLength) - 1);
+    const originalStart = normalized.map[Math.min(bestStart, normalized.map.length - 1)] ?? 0;
+    const originalEnd = normalized.map[normEnd] ?? originalStart;
+    const start = Math.max(0, originalStart - 60);
+    const end = Math.min(markdown.length, originalEnd + 120);
+    const excerpt = markdown.slice(start, end).replace(/\s+/g, " ").trim();
+    const prefix = start > 0 ? "..." : "";
+    const suffix = end < markdown.length ? "..." : "";
+    return `${prefix}${excerpt}${suffix}`;
   }
 
   private validateTitle(title: string): string {
@@ -906,10 +982,246 @@ function normalizeTitle(input: string): string {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function tokenize(input: string): string[] {
-  return normalizeTitle(input)
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
+function normalizeSearchText(input: string): string {
+  return normalizeSearchTextWithMap(input).text;
+}
+
+function normalizeSearchTextWithMap(input: string): NormalizedTextWithMap {
+  let normalized = "";
+  const map: number[] = [];
+  let sourceOffset = 0;
+  let justWroteSpace = true;
+
+  for (const sourceChar of input) {
+    const sourceIndex = sourceOffset;
+    sourceOffset += sourceChar.length;
+
+    for (const part of sourceChar.normalize("NFKD")) {
+      if (/\p{Mark}/u.test(part)) {
+        continue;
+      }
+
+      const lower = part.toLowerCase();
+      const isWordChar = /[\p{Letter}\p{Number}]/u.test(lower) || lower === "+" || lower === "#";
+      if (isWordChar) {
+        normalized += lower;
+        map.push(sourceIndex);
+        justWroteSpace = false;
+        continue;
+      }
+
+      if (!justWroteSpace && normalized.length > 0) {
+        normalized += " ";
+        map.push(sourceIndex);
+        justWroteSpace = true;
+      }
+    }
+  }
+
+  let start = 0;
+  while (start < normalized.length && normalized[start] === " ") {
+    start += 1;
+  }
+
+  let end = normalized.length;
+  while (end > start && normalized[end - 1] === " ") {
+    end -= 1;
+  }
+
+  return {
+    text: normalized.slice(start, end),
+    map: map.slice(start, end)
+  };
+}
+
+function splitSearchTokens(normalized: string): string[] {
+  return normalized.split(" ").filter(Boolean);
+}
+
+function singularizeToken(token: string): string {
+  if (token.length <= 3 || /[+#]/.test(token)) {
+    return token;
+  }
+
+  if (token.endsWith("ies") && token.length > 4) {
+    return `${token.slice(0, -3)}y`;
+  }
+
+  if (/(sses|shes|ches|xes|zes)$/.test(token)) {
+    return token.slice(0, -2);
+  }
+
+  if (token.endsWith("s") && !token.endsWith("ss") && !token.endsWith("is") && !token.endsWith("us")) {
+    return token.slice(0, -1);
+  }
+
+  return token;
+}
+
+function stemSearchToken(token: string): string {
+  if (!token || /[+#]/.test(token)) {
+    return token;
+  }
+
+  let stem = singularizeToken(token);
+  const suffixes = ["ingly", "edly", "ments", "ment", "ness", "ation", "ing", "ed", "ly", "er"];
+
+  for (const suffix of suffixes) {
+    if (stem.length > suffix.length + 2 && stem.endsWith(suffix)) {
+      stem = stem.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  if (stem.length > 3 && /(.)\1$/.test(stem)) {
+    stem = stem.slice(0, -1);
+  }
+
+  return stem.length >= 2 ? stem : token;
+}
+
+function parseSearchQuery(rawQuery: string): ParsedSearchQuery {
+  const normalized = normalizeSearchText(rawQuery);
+  if (!normalized) {
+    return {
+      normalized: "",
+      phrases: [],
+      terms: []
+    };
+  }
+
+  const phraseSet = new Set<string>();
+  const termSet = new Set<string>();
+  let matchedAnyPart = false;
+
+  for (const match of rawQuery.matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)) {
+    matchedAnyPart = true;
+    const quoted = match[1] ?? match[2];
+    const rawPart = (quoted ?? match[3] ?? "").trim();
+    if (!rawPart) {
+      continue;
+    }
+
+    const partNormalized = normalizeSearchText(rawPart);
+    if (!partNormalized) {
+      continue;
+    }
+
+    for (const token of splitSearchTokens(partNormalized)) {
+      termSet.add(token);
+    }
+
+    if (quoted) {
+      phraseSet.add(partNormalized);
+    }
+  }
+
+  if (!matchedAnyPart) {
+    for (const token of splitSearchTokens(normalized)) {
+      termSet.add(token);
+    }
+  }
+
+  if (normalized.includes(" ")) {
+    phraseSet.add(normalized);
+  }
+
+  const terms: SearchTerm[] = [...termSet].map((token) => {
+    const stem = stemSearchToken(token);
+    return {
+      normalized: token,
+      stem: stem || token
+    };
+  });
+
+  return {
+    normalized,
+    phrases: [...phraseSet],
+    terms
+  };
+}
+
+function scoreSearchField(field: string, query: ParsedSearchQuery, weights: SearchFieldWeights): SearchFieldMatch {
+  const normalizedField = normalizeSearchText(field);
+  if (!normalizedField) {
+    return { score: 0, matchedTerms: 0 };
+  }
+
+  let score = 0;
+  if (normalizedField === query.normalized) {
+    score += weights.exactQuery;
+  }
+  if (normalizedField.includes(query.normalized)) {
+    score += weights.containsQuery;
+  }
+
+  for (const phrase of query.phrases) {
+    if (phrase && normalizedField.includes(phrase)) {
+      score += weights.phrase;
+    }
+  }
+
+  if (query.terms.length === 0) {
+    return { score, matchedTerms: 0 };
+  }
+
+  const tokens = splitSearchTokens(normalizedField);
+  if (tokens.length === 0) {
+    return { score, matchedTerms: 0 };
+  }
+
+  const tokenStems = tokens.map((token) => stemSearchToken(token));
+  let matchedTerms = 0;
+  const matchedPositions: number[] = [];
+
+  for (const term of query.terms) {
+    let bestMatchType = 0;
+    let bestPosition = -1;
+
+    for (let idx = 0; idx < tokens.length; idx += 1) {
+      const token = tokens[idx] ?? "";
+      const tokenStem = tokenStems[idx] ?? token;
+      const exact = token === term.normalized || tokenStem === term.stem;
+      if (exact) {
+        bestMatchType = 2;
+        bestPosition = idx;
+        break;
+      }
+
+      const partial =
+        token.startsWith(term.normalized) ||
+        tokenStem.startsWith(term.stem);
+
+      if (partial && bestMatchType < 1) {
+        bestMatchType = 1;
+        bestPosition = idx;
+      }
+    }
+
+    if (bestMatchType === 0 && normalizedField.includes(term.normalized)) {
+      bestMatchType = 1;
+    }
+
+    if (bestMatchType > 0) {
+      matchedTerms += 1;
+      score += bestMatchType === 2 ? weights.termExact : weights.termPartial;
+      if (bestPosition >= 0) {
+        matchedPositions.push(bestPosition);
+      }
+    }
+  }
+
+  if (matchedTerms === query.terms.length) {
+    score += weights.allTerms;
+    if (matchedPositions.length >= 2) {
+      const minPos = Math.min(...matchedPositions);
+      const maxPos = Math.max(...matchedPositions);
+      const span = maxPos - minPos + 1;
+      score += Math.max(0, weights.proximityMax - span + 1);
+    }
+  }
+
+  return { score, matchedTerms };
 }
 
 function slugify(input: string): string {

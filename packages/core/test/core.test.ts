@@ -71,6 +71,27 @@ describe("MimexCore", () => {
     expect(fallback.candidates.length).toBeGreaterThan(0);
   });
 
+  it("handles punctuation-heavy multi-word search with phrase and singular matching", async () => {
+    const core = await newCore();
+    await core.createNote({
+      title: "Azure Deployment Runbook",
+      aliases: ["Azure deploy"],
+      markdown:
+        "./push-to-registry.sh --containers \"i2kweb\" i2kconnect.azurecr.io\n\nContainer deployments for canary rollouts."
+    });
+    await core.createNote({
+      title: "Deployment scratchpad",
+      markdown: "misc deployment notes without registry hostname"
+    });
+
+    const complex = await core.searchNotes("\"azure deployment\" i2kconnect.azurecr.io containers", 5);
+    expect(complex[0]?.title).toBe("Azure Deployment Runbook");
+    expect(complex[0]?.excerpt.toLowerCase()).toContain("i2kconnect.azurecr.io");
+
+    const singular = await core.searchNotes("container deploy", 5);
+    expect(singular.map((row) => row.title)).toContain("Azure Deployment Runbook");
+  });
+
   it("increments soft-link weights", async () => {
     const core = await newCore();
     await core.createNote({ title: "Source", markdown: "[[Target]]" });
