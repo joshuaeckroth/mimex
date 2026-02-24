@@ -25,6 +25,7 @@ const state = {
   searchResults: [],
   selectedNoteId: null,
   selectedNote: null,
+  softLinks: [],
   includeArchived: false,
   focusPane: "notes",
   activeBodyIndex: 0,
@@ -36,6 +37,10 @@ const state = {
   wide: false,
   sidebarOpen: false
 };
+
+const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
+const EDIT_ERROR_MARKER = "MIMEX_EDIT_ERROR";
+const EDIT_ERROR_LINE_RE = /^<!--\s*MIMEX_EDIT_ERROR:\s*.*-->$/;
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
@@ -235,6 +240,73 @@ function formatDate(ts) {
   } catch {
     return ts;
   }
+}
+
+function sanitizeEditErrorMessage(message) {
+  return String(message || "")
+    .replace(/\r?\n/g, " ")
+    .replace(/-->/g, "-- >")
+    .trim();
+}
+
+function formatEditableNoteContent(title, markdown, errorMessage) {
+  const lines = [];
+  if (errorMessage) {
+    lines.push(`<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`);
+  }
+  lines.push(`${EDIT_TITLE_PREFIX} ${String(title || "").trim()}`);
+  lines.push("");
+  if (markdown) {
+    lines.push(String(markdown));
+  }
+  return lines.join("\n");
+}
+
+function stripLeadingEditErrorComments(content) {
+  return String(content || "").replace(/^(?:<!--\s*MIMEX_EDIT_ERROR:\s*.*-->\n?)*/, "");
+}
+
+function prependEditErrorComment(content, errorMessage) {
+  const normalized = String(content || "").replace(/\r\n/g, "\n");
+  const stripped = stripLeadingEditErrorComments(normalized);
+  const comment = `<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`;
+  if (!stripped) {
+    return `${comment}\n`;
+  }
+  return `${comment}\n${stripped}`;
+}
+
+function parseEditedNoteContent(content) {
+  const normalized = String(content || "").replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  let index = 0;
+
+  while (index < lines.length) {
+    const trimmed = (lines[index] || "").trim();
+    if (!trimmed || EDIT_ERROR_LINE_RE.test(trimmed)) {
+      index += 1;
+      continue;
+    }
+    if (!trimmed.startsWith(EDIT_TITLE_PREFIX)) {
+      throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
+    }
+    const title = trimmed.slice(EDIT_TITLE_PREFIX.length).trim();
+    if (!title) {
+      throw new Error("title marker is empty");
+    }
+
+    index += 1;
+    if (index < lines.length && !(lines[index] || "").trim()) {
+      index += 1;
+    }
+
+    return {
+      title,
+      markdown: lines.slice(index).join("\n")
+    };
+  }
+
+  throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
 }
 
 function listRows() {
@@ -471,7 +543,13 @@ async function followInternalLink(sourceNoteId, targetHint) {
     });
 
     if (result.targetNoteId) {
-      await selectNote(result.targetNoteId);
+      if (result.reason === "search") {
+        els.searchInput.value = target;
+        writeHashState();
+        await refreshList({ preserveSelection: false, preferredNoteId: result.targetNoteId });
+      } else {
+        await selectNote(result.targetNoteId);
+      }
       setStatus(`Followed link to ${result.targetTitle ?? result.targetNoteId}`);
       return;
     }
@@ -518,6 +596,55 @@ function renderMarkdownInto(container, markdown, sourceNoteId) {
   const sanitized = markdownRenderer.sanitize(rendered);
   container.innerHTML = sanitized;
   bindRenderedLinks(container, sourceNoteId);
+}
+
+function createSoftLinksPanel() {
+  const panel = document.createElement("aside");
+  panel.className = "soft-links-panel";
+
+  const top = state.softLinks.slice(0, 10);
+  const heading = document.createElement("div");
+  heading.className = "soft-links-head";
+  heading.textContent = `soft links ${top.length}`;
+  panel.append(heading);
+
+  const grid = document.createElement("div");
+  grid.className = "soft-links-grid";
+
+  if (top.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-msg";
+    empty.textContent = "(none)";
+    grid.append(empty);
+    panel.append(grid);
+    return panel;
+  }
+
+  for (const [index, link] of top.entries()) {
+    const row = document.createElement("a");
+    row.href = "#";
+    row.className = "soft-link-row";
+    row.dataset.noteId = link.noteId;
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      setFocusPane("notes");
+      void selectNote(link.noteId);
+    });
+
+    const title = document.createElement("div");
+    title.className = "soft-link-title";
+    title.textContent = `${index + 1}. ${link.title}`;
+
+    const meta = document.createElement("div");
+    meta.className = "soft-link-meta";
+    meta.textContent = `weight ${link.weight}`;
+
+    row.append(title, meta);
+    grid.append(row);
+  }
+
+  panel.append(grid);
+  return panel;
 }
 
 function renderNoteList() {
@@ -570,6 +697,19 @@ async function saveBody(noteId, bodyId, markdown) {
   return updated;
 }
 
+async function renameNote(noteId, title) {
+  const updated = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/title`, {
+    method: "PUT",
+    body: JSON.stringify({ title })
+  });
+
+  state.selectedNote = updated;
+  state.selectedNoteId = updated.note.id;
+  updateCachedNoteMeta(updated.note);
+  renderNoteList();
+  return updated;
+}
+
 function renderNoteDetail() {
   const note = state.selectedNote;
   if (!note) {
@@ -584,6 +724,9 @@ function renderNoteDetail() {
   const header = document.createElement("header");
   header.className = "detail-head";
 
+  const headMain = document.createElement("div");
+  headMain.className = "detail-head-main";
+
   const h2 = document.createElement("h2");
   h2.textContent = note.note.title;
 
@@ -593,15 +736,55 @@ function renderNoteDetail() {
     note.note.archivedAt ? " | archived" : ""
   }`;
 
-  header.append(h2, subline);
+  headMain.append(h2, subline);
+
+  const headActions = document.createElement("div");
+  headActions.className = "detail-head-actions";
+
+  const addBodyBtn = document.createElement("button");
+  addBodyBtn.type = "button";
+  addBodyBtn.className = "detail-head-btn";
+  addBodyBtn.textContent = "add body";
+  addBodyBtn.addEventListener("click", () => {
+    void runCommand(addBodyFromPrompt);
+  });
+
+  const archiveBtn = document.createElement("button");
+  archiveBtn.type = "button";
+  archiveBtn.className = "detail-head-btn";
+  archiveBtn.textContent = note.note.archivedAt ? "restore" : "archive";
+  archiveBtn.addEventListener("click", () => {
+    void runCommand(note.note.archivedAt ? restoreSelectedNote : archiveSelectedNote);
+  });
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "detail-head-btn";
+  deleteBtn.textContent = "delete";
+  deleteBtn.addEventListener("click", () => {
+    void runCommand(deleteSelectedNote);
+  });
+
+  headActions.append(addBodyBtn, archiveBtn, deleteBtn);
+  header.append(headMain, headActions);
   els.noteDetail.append(header);
+
+  const detailContent = document.createElement("div");
+  detailContent.className = "detail-content";
+
+  const detailMain = document.createElement("div");
+  detailMain.className = "detail-main";
+
+  const softLinksPanel = createSoftLinksPanel();
 
   if (note.bodies.length === 0) {
     state.activeBodyIndex = 0;
     const empty = document.createElement("div");
     empty.className = "empty-msg";
     empty.textContent = "No bodies on this note.";
-    els.noteDetail.append(empty);
+    detailMain.append(empty);
+    detailContent.append(detailMain, softLinksPanel);
+    els.noteDetail.append(detailContent);
     return;
   }
 
@@ -631,13 +814,13 @@ function renderNoteDetail() {
       const editBtn = document.createElement("button");
       editBtn.type = "button";
       editBtn.className = "body-label-btn";
-      editBtn.textContent = "edit body";
+      editBtn.textContent = "edit note";
       editBtn.disabled = isSaving;
       editBtn.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         state.editingBodyIds.add(bodyKey);
-        state.bodyDrafts.set(bodyKey, body.markdown);
+        state.bodyDrafts.set(bodyKey, formatEditableNoteContent(note.note.title, body.markdown));
         renderNoteDetail();
       });
 
@@ -661,16 +844,18 @@ function renderNoteDetail() {
       renderMarkdownInto(text, body.markdown, note.note.id);
       wrap.append(text);
       card.append(label, wrap);
-      els.noteDetail.append(card);
+      detailMain.append(card);
       continue;
     }
 
+    const baseEditorValue = formatEditableNoteContent(note.note.title, body.markdown);
     if (!state.bodyDrafts.has(bodyKey)) {
-      state.bodyDrafts.set(bodyKey, body.markdown);
+      state.bodyDrafts.set(bodyKey, baseEditorValue);
     }
     const editor = document.createElement("textarea");
     editor.className = "body-editor";
-    editor.value = state.bodyDrafts.get(bodyKey) ?? body.markdown;
+    editor.rows = 36;
+    editor.value = state.bodyDrafts.get(bodyKey) ?? baseEditorValue;
     editor.setAttribute("spellcheck", "false");
     editor.disabled = isSaving;
 
@@ -679,8 +864,8 @@ function renderNoteDetail() {
 
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
-    saveBtn.disabled = isSaving || editor.value === body.markdown;
-    saveBtn.textContent = isSaving ? "saving..." : "save body";
+    saveBtn.disabled = isSaving || editor.value === baseEditorValue;
+    saveBtn.textContent = isSaving ? "saving..." : "save";
 
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
@@ -691,13 +876,30 @@ function renderNoteDetail() {
     saveState.className = "body-state";
     saveState.textContent = isSaving
       ? "Saving changes"
-      : editor.value === body.markdown
+      : editor.value === baseEditorValue
         ? "No pending changes"
         : "Unsaved changes";
 
     async function persistBody() {
       const draft = editor.value;
-      if (draft === body.markdown) {
+      if (draft === baseEditorValue) {
+        return;
+      }
+
+      let parsed = null;
+      try {
+        parsed = parseEditedNoteContent(draft);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.bodyDrafts.set(bodyKey, prependEditErrorComment(draft, message));
+        setStatus(`Invalid edit format: ${message}`, true);
+        renderNoteDetail();
+        return;
+      }
+
+      const titleChanged = parsed.title !== note.note.title;
+      const markdownChanged = parsed.markdown !== body.markdown;
+      if (!titleChanged && !markdownChanged) {
         return;
       }
 
@@ -705,13 +907,26 @@ function renderNoteDetail() {
       state.savingBodyIds.add(bodyKey);
       renderNoteDetail();
       try {
-        const updated = await saveBody(note.note.id, body.id, draft);
+        let updated = note;
+        if (titleChanged) {
+          updated = await renameNote(note.note.id, parsed.title);
+        }
+        if (markdownChanged) {
+          updated = await saveBody(note.note.id, body.id, parsed.markdown);
+        }
         state.editingBodyIds.delete(bodyKey);
         state.bodyDrafts.delete(bodyKey);
-        setStatus(`Saved ${updated.note.title}`);
+        if (titleChanged && markdownChanged) {
+          setStatus(`Saved title and body for ${updated.note.title}`);
+        } else if (titleChanged) {
+          setStatus(`Saved title for ${updated.note.title}`);
+        } else {
+          setStatus(`Saved body for ${updated.note.title}`);
+        }
         saved = true;
       } catch (error) {
-        setStatus(`Failed to save body: ${error.message}`, true);
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`Failed to save note: ${message}`, true);
       } finally {
         state.savingBodyIds.delete(bodyKey);
         if (!saved) {
@@ -734,8 +949,8 @@ function renderNoteDetail() {
 
     editor.addEventListener("input", () => {
       state.bodyDrafts.set(bodyKey, editor.value);
-      saveBtn.disabled = editor.value === body.markdown;
-      saveState.textContent = editor.value === body.markdown ? "No pending changes" : "Unsaved changes";
+      saveBtn.disabled = editor.value === baseEditorValue;
+      saveState.textContent = editor.value === baseEditorValue ? "No pending changes" : "Unsaved changes";
     });
 
     editor.addEventListener("keydown", (event) => {
@@ -749,8 +964,11 @@ function renderNoteDetail() {
     wrap.append(editor, actions);
 
     card.append(label, wrap);
-    els.noteDetail.append(card);
+    detailMain.append(card);
   }
+
+  detailContent.append(detailMain, softLinksPanel);
+  els.noteDetail.append(detailContent);
 }
 
 async function selectNote(noteId) {
@@ -769,7 +987,20 @@ async function selectNote(noteId) {
   setStatus("Loading note...");
 
   try {
-    state.selectedNote = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}`);
+    const [noteData, softLinksData] = await Promise.all([
+      apiFetch(`/api/notes/${encodeURIComponent(noteId)}`),
+      apiFetch(`/api/notes/${encodeURIComponent(noteId)}/soft-links?limit=10`).catch(() => [])
+    ]);
+    state.selectedNote = noteData;
+    state.softLinks = Array.isArray(softLinksData)
+      ? softLinksData
+          .map((entry) => ({
+            noteId: String(entry?.noteId ?? ""),
+            title: String(entry?.title ?? ""),
+            weight: Number(entry?.weight ?? 0)
+          }))
+          .filter((entry) => entry.noteId)
+      : [];
     state.activeBodyIndex = 0;
     state.savingBodyIds.clear();
     state.editingBodyIds.clear();
@@ -779,6 +1010,7 @@ async function selectNote(noteId) {
     setStatus(`Loaded ${state.selectedNote.note.title} (${bodyCount} bodies)`);
   } catch (error) {
     state.selectedNote = null;
+    state.softLinks = [];
     renderNoteDetail();
     setStatus(`Failed to load note: ${error.message}`, true);
   }
@@ -834,6 +1066,7 @@ async function refreshList({ preserveSelection = true, preferredNoteId = null } 
       await selectNote(state.selectedNoteId);
     } else {
       state.selectedNote = null;
+      state.softLinks = [];
       state.selectedNoteId = null;
       renderNoteDetail();
       writeHashState();
@@ -986,7 +1219,7 @@ function enterEditOnActiveBody() {
   }
   const bodyKey = `${note.note.id}:${body.id}`;
   state.editingBodyIds.add(bodyKey);
-  state.bodyDrafts.set(bodyKey, body.markdown);
+  state.bodyDrafts.set(bodyKey, formatEditableNoteContent(note.note.title, body.markdown));
   state.focusPane = "body";
   applyUiState();
   renderNoteDetail();
