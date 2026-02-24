@@ -12,7 +12,7 @@ const autoCommit = parseEnvBool(process.env.MIMEX_AUTO_COMMIT, true);
 
 const coreByUser = new Map<string, MimexCore>();
 
-function parseEnvBool(value: string | undefined, fallback: boolean): boolean {
+export function parseEnvBool(value: string | undefined, fallback: boolean): boolean {
   if (!value) {
     return fallback;
   }
@@ -27,7 +27,7 @@ function parseEnvBool(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
-function normalizeUserId(value: string | undefined): string {
+export function normalizeUserId(value: string | undefined): string {
   const cleaned = (value ?? defaultUserId).trim();
   if (!cleaned) {
     return "local";
@@ -80,7 +80,7 @@ function resultError(error: unknown): { isError: true; content: Array<{ type: "t
   };
 }
 
-async function workspaceInfo(userIdRaw: string | undefined): Promise<{
+export async function workspaceInfo(userIdRaw: string | undefined): Promise<{
   userId: string;
   workspace: string;
   notes: number;
@@ -115,7 +115,7 @@ async function workspaceInfo(userIdRaw: string | undefined): Promise<{
   };
 }
 
-function registerTools(server: McpServer): void {
+export function registerTools(server: McpServer): void {
   server.registerTool(
     "mimex_workspace_info",
     {
@@ -318,6 +318,59 @@ function registerTools(server: McpServer): void {
   );
 
   server.registerTool(
+    "mimex_body_rename",
+    {
+      title: "Mimex Rename Body",
+      description: "Rename the label for an existing note body.",
+      inputSchema: {
+        userId: z.string().optional(),
+        noteRef: z.string().min(1),
+        bodyId: z.string().min(1),
+        label: z.string().min(1)
+      }
+    },
+    async ({ userId, noteRef, bodyId, label }) => {
+      try {
+        const { userId: resolvedUserId, workspacePath, core } = await getCoreContext(userId);
+        const note = await core.renameBody({ noteRef, bodyId, label });
+        return resultJson({
+          userId: resolvedUserId,
+          workspace: workspacePath,
+          note
+        });
+      } catch (error) {
+        return resultError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "mimex_body_delete",
+    {
+      title: "Mimex Delete Body",
+      description: "Delete an existing note body.",
+      inputSchema: {
+        userId: z.string().optional(),
+        noteRef: z.string().min(1),
+        bodyId: z.string().min(1)
+      }
+    },
+    async ({ userId, noteRef, bodyId }) => {
+      try {
+        const { userId: resolvedUserId, workspacePath, core } = await getCoreContext(userId);
+        const note = await core.deleteBody({ noteRef, bodyId });
+        return resultJson({
+          userId: resolvedUserId,
+          workspace: workspacePath,
+          note
+        });
+      } catch (error) {
+        return resultError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     "mimex_note_archive",
     {
       title: "Mimex Archive Note",
@@ -475,7 +528,7 @@ function registerTools(server: McpServer): void {
   );
 }
 
-async function main(): Promise<void> {
+export async function startMcpServer(): Promise<void> {
   // Keep process alive for stdio mode in non-interactive shells where stdin may report EOF immediately.
   const keepAlive = setInterval(() => {}, 60_000);
   process.on("exit", () => clearInterval(keepAlive));
@@ -500,7 +553,10 @@ async function main(): Promise<void> {
   console.error(`mimex-mcp ready (workspaceRoot=${workspaceRoot}, autoCommit=${String(autoCommit)})`);
 }
 
-main().catch((error) => {
-  console.error("mimex-mcp failed:", error);
-  process.exit(1);
-});
+const isVitest = process.env.VITEST === "true";
+if (!isVitest) {
+  startMcpServer().catch((error) => {
+    console.error("mimex-mcp failed:", error);
+    process.exit(1);
+  });
+}

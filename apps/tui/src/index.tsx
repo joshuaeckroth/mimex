@@ -8,7 +8,7 @@ import blessed from "neo-blessed";
 import { extractHardLinks, MimexCore } from "@mimex/core";
 import type { FollowLinkResult, HardLink, NoteMeta, NoteWithBodies, SoftLinkTarget } from "@mimex/shared-types";
 
-type InputMode = "none" | "search" | "create" | "body" | "follow" | "confirmDelete";
+type InputMode = "none" | "search" | "create" | "body" | "bodyLabel" | "follow" | "confirmDelete" | "confirmDeleteBody";
 type FocusPane = "notes" | "bodies";
 type ThemeName = "dark" | "light";
 
@@ -90,6 +90,7 @@ interface TuiState {
   completionCycle: CompletionCycle | null;
   bodyScrollOffset: number;
   pendingDeleteNote: NoteMeta | null;
+  pendingDeleteBody: { noteId: string; bodyId: string; label: string } | null;
 }
 
 interface ThemePalette {
@@ -120,7 +121,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
+  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, m rename body label, d delete body, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete note, x archived, t theme, s refresh, q quit";
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
@@ -174,7 +175,7 @@ const THEMES: Record<ThemeName, ThemePalette> = {
   }
 };
 
-function resolveInitialTheme(raw: string | undefined): ThemeName {
+export function resolveInitialTheme(raw: string | undefined): ThemeName {
   if (!raw) {
     return "dark";
   }
@@ -211,10 +212,14 @@ function promptForMode(mode: InputMode): string {
       return "New note title";
     case "body":
       return "Body markdown";
+    case "bodyLabel":
+      return "Body label";
     case "follow":
       return "Follow target";
     case "confirmDelete":
       return "Type DELETE to confirm permanent removal";
+    case "confirmDeleteBody":
+      return "Type DELETE to confirm body removal";
     default:
       return "";
   }
@@ -224,7 +229,7 @@ function sanitizeEditErrorMessage(message: string): string {
   return message.replace(/\r?\n/g, " ").replace(/-->/g, "-- >").trim();
 }
 
-function formatEditableNoteContent(title: string, markdown: string, errorMessage?: string): string {
+export function formatEditableNoteContent(title: string, markdown: string, errorMessage?: string): string {
   const lines: string[] = [];
   if (errorMessage) {
     lines.push(`<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`);
@@ -241,7 +246,7 @@ function stripLeadingEditErrorComments(content: string): string {
   return content.replace(/^(?:<!--\s*MIMEX_EDIT_ERROR:\s*.*-->\n?)*/, "");
 }
 
-function prependEditErrorComment(content: string, errorMessage: string): string {
+export function prependEditErrorComment(content: string, errorMessage: string): string {
   const normalized = content.replace(/\r\n/g, "\n");
   const stripped = stripLeadingEditErrorComments(normalized);
   const errorComment = `<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`;
@@ -251,7 +256,7 @@ function prependEditErrorComment(content: string, errorMessage: string): string 
   return `${errorComment}\n${stripped}`;
 }
 
-function parseEditedNoteContent(content: string): { title: string; markdown: string } {
+export function parseEditedNoteContent(content: string): { title: string; markdown: string } {
   const normalized = content.replace(/\r\n/g, "\n");
   const lines = normalized.split("\n");
   let index = 0;
@@ -286,13 +291,13 @@ function parseEditedNoteContent(content: string): { title: string; markdown: str
   throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
 }
 
-function uniqueSorted(values: string[]): string[] {
+export function uniqueSorted(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" })
   );
 }
 
-function filterCompletionCandidates(values: string[], seed: string): string[] {
+export function filterCompletionCandidates(values: string[], seed: string): string[] {
   const source = uniqueSorted(values);
   const query = seed.trim().toLowerCase();
   if (!query) {
@@ -728,7 +733,8 @@ function main(): void {
     inputValue: "",
     completionCycle: null,
     bodyScrollOffset: 0,
-    pendingDeleteNote: null
+    pendingDeleteNote: null,
+    pendingDeleteBody: null
   };
 
   let isBusy = false;
@@ -1280,6 +1286,10 @@ function main(): void {
       return titleAndAlias;
     }
 
+    if (mode === "bodyLabel") {
+      return uniqueSorted(state.details.openedNote?.bodies.map((body) => body.label) ?? []);
+    }
+
     return [];
   }
 
@@ -1433,11 +1443,13 @@ function main(): void {
     const value = state.inputValue.trim();
     const currentMode = state.mode;
     const pendingDeleteNote = state.pendingDeleteNote;
+    const pendingDeleteBody = state.pendingDeleteBody;
 
     state.mode = "none";
     state.inputValue = "";
     state.completionCycle = null;
     state.pendingDeleteNote = null;
+    state.pendingDeleteBody = null;
 
     if (currentMode === "confirmDelete") {
       if (!pendingDeleteNote) {
@@ -1462,6 +1474,30 @@ function main(): void {
       detailsCache.delete(pendingDeleteNote.id);
       await refresh(preferredAfterDelete);
       setStatus(`Deleted ${pendingDeleteNote.title}`);
+      renderUI();
+      return;
+    }
+
+    if (currentMode === "confirmDeleteBody") {
+      if (!pendingDeleteBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      if (value !== "DELETE") {
+        setStatus(`Body delete cancelled for ${pendingDeleteBody.label}`);
+        renderUI();
+        return;
+      }
+
+      await core.deleteBody({
+        noteRef: pendingDeleteBody.noteId,
+        bodyId: pendingDeleteBody.bodyId
+      });
+      detailsCache.delete(pendingDeleteBody.noteId);
+      await refresh(pendingDeleteBody.noteId);
+      setStatus(`Deleted body ${pendingDeleteBody.label}`);
       renderUI();
       return;
     }
@@ -1525,6 +1561,33 @@ function main(): void {
       detailsCache.delete(selected.id);
       await refresh(selected.id);
       setStatus("Added body");
+      renderUI();
+      return;
+    }
+
+    if (currentMode === "bodyLabel") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      const activeBody = state.details.openedNote?.bodies[state.details.activeBodyIndex];
+      if (!activeBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      await core.renameBody({
+        noteRef: selected.id,
+        bodyId: activeBody.id,
+        label: value
+      });
+      detailsCache.delete(selected.id);
+      await refresh(selected.id);
+      setStatus(`Renamed body label to ${value}`);
       renderUI();
       return;
     }
@@ -1922,9 +1985,9 @@ function main(): void {
     screen.render();
   }
 
-  function enterInputMode(mode: InputMode, statusMessage: string): void {
+  function enterInputMode(mode: InputMode, statusMessage: string, initialValue = ""): void {
     state.mode = mode;
-    state.inputValue = "";
+    state.inputValue = initialValue;
     state.completionCycle = null;
     setStatus(statusMessage);
     renderFooterOnly();
@@ -1936,13 +1999,14 @@ function main(): void {
       state.inputValue = "";
       state.completionCycle = null;
       state.pendingDeleteNote = null;
+      state.pendingDeleteBody = null;
       setStatus("Input cancelled");
       renderFooterOnly();
       return;
     }
 
     if (key.name === "tab") {
-      if (state.mode === "confirmDelete") {
+      if (state.mode === "confirmDelete" || state.mode === "confirmDeleteBody") {
         return;
       }
 
@@ -2165,6 +2229,49 @@ function main(): void {
       return;
     }
 
+    if (ch === "m") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      const activeBody = state.details.openedNote?.bodies[state.details.activeBodyIndex];
+      if (!activeBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      enterInputMode("bodyLabel", `Rename body label (${activeBody.label})`, activeBody.label);
+      return;
+    }
+
+    if (ch === "d") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      const activeBody = state.details.openedNote?.bodies[state.details.activeBodyIndex];
+      if (!activeBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      state.pendingDeleteBody = {
+        noteId: selected.id,
+        bodyId: activeBody.id,
+        label: activeBody.label
+      };
+      enterInputMode("confirmDeleteBody", `Delete body ${activeBody.label}? This is permanent.`);
+      return;
+    }
+
     if (ch === "l") {
       void runAction(async () => {
         await showCurrentBodyInLess();
@@ -2283,6 +2390,21 @@ function main(): void {
     activateSelectedNoteAtIndex(noteIndex);
   }
 
+  function parseNotesMouseEventArgs(first: unknown, second?: unknown): { data: { x?: number; y?: number }; item?: unknown } {
+    const isMouseData = (value: unknown): value is { x?: number; y?: number } =>
+      Boolean(value) &&
+      typeof value === "object" &&
+      ("x" in (value as Record<string, unknown>) || "y" in (value as Record<string, unknown>));
+
+    if (isMouseData(first)) {
+      return { data: first, item: second };
+    }
+    if (isMouseData(second)) {
+      return { data: second, item: first };
+    }
+    return { data: {}, item: first };
+  }
+
   function handleNotesWheel(direction: "up" | "down"): void {
     if (state.mode !== "none") {
       return;
@@ -2381,10 +2503,15 @@ function main(): void {
 
   (notesList as blessed.Widgets.ListElement & { on(event: string, listener: (...args: unknown[]) => void): void }).on(
     "element click",
-    (item: unknown, data: unknown) => {
-      handleNotesClick(data as { x?: number; y?: number }, item);
+    (first: unknown, second: unknown) => {
+      const { data, item } = parseNotesMouseEventArgs(first, second);
+      handleNotesClick(data, item);
     }
   );
+
+  notesList.on("click", (data: unknown) => {
+    handleNotesClick((data as { x?: number; y?: number }) ?? {});
+  });
 
   notesList.on("wheelup", () => {
     handleNotesWheel("up");
@@ -2436,4 +2563,7 @@ function main(): void {
   })();
 }
 
-main();
+const isVitest = process.env.VITEST === "true";
+if (!isVitest) {
+  main();
+}
