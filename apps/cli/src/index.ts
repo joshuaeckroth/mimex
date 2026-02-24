@@ -261,6 +261,18 @@ program
   });
 
 program
+  .command("note:rename")
+  .description("rename a note")
+  .argument("<noteRef>", "note id or title")
+  .argument("<title>", "new note title")
+  .action(async (noteRef, title) => {
+    await withCore(async (core) => {
+      const note = await core.renameNote(noteRef, title);
+      printOutput(note, renderNote(note), porcelainNote(note));
+    });
+  });
+
+program
   .command("note:archive")
   .description("archive a note (non-destructive alternative to delete)")
   .argument("<noteRef>", "note id or title")

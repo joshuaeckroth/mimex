@@ -6,6 +6,7 @@ const COMMANDS = [
   "note:create",
   "note:get",
   "note:list",
+  "note:rename",
   "note:archive",
   "note:restore",
   "note:delete",
@@ -108,7 +109,7 @@ _mimex_cli_complete() {
   fi
 
   case "$cmd" in
-    note:get|note:archive|note:restore|note:delete|links:hard|links:resolve|links:follow-hard|links:soft)
+    note:get|note:rename|note:archive|note:restore|note:delete|links:hard|links:resolve|links:follow-hard|links:soft)
       if [[ "$arg_index" -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$(__mimex_cli_note_ids)" -- "$cur") )
         return 0
@@ -170,7 +171,7 @@ complete -c mimex-cli -l porcelain
 
 ${commandLines}
 
-complete -c mimex-cli -n '__fish_seen_subcommand_from note:get note:archive note:restore note:delete links:hard links:resolve links:follow-hard links:soft body:add follow' -f -a '(__mimex_cli_note_ids)'
+complete -c mimex-cli -n '__fish_seen_subcommand_from note:get note:rename note:archive note:restore note:delete links:hard links:resolve links:follow-hard links:soft body:add follow' -f -a '(__mimex_cli_note_ids)'
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l markdown -s m -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l markdown-file -s f -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l label -s l -r

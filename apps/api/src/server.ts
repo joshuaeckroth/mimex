@@ -51,6 +51,10 @@ const updateBodySchema = z.object({
   markdown: z.string()
 });
 
+const renameNoteSchema = z.object({
+  title: z.string().min(1)
+});
+
 const followLinkSchema = z.object({
   source: z.string().min(1),
   target: z.string().min(1)
@@ -134,6 +138,27 @@ app.put("/api/notes/:noteRef/bodies/:bodyId", async (request, reply) => {
     return reply.code(200).send(note);
   } catch (error) {
     return reply.code(404).send({ error: (error as Error).message });
+  }
+});
+
+app.put("/api/notes/:noteRef/title", async (request, reply) => {
+  const core = await getCore(request.headers["x-user-id"] as string | undefined);
+  const params = z.object({ noteRef: z.string().min(1) }).parse(request.params);
+  const parsed = renameNoteSchema.safeParse(request.body);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: parsed.error.flatten() });
+  }
+
+  try {
+    const note = await core.renameNote(params.noteRef, parsed.data.title);
+    return reply.code(200).send(note);
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message.startsWith("note not found")) {
+      return reply.code(404).send({ error: message });
+    }
+    return reply.code(400).send({ error: message });
   }
 });
 

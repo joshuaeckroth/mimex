@@ -203,6 +203,36 @@ export class MimexCore {
     return this.getNote(note.id);
   }
 
+  async renameNote(noteRef: string, title: string): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${noteRef}`);
+    }
+    if (isArchived(note)) {
+      throw new Error(`note is archived: ${note.title}`);
+    }
+
+    const nextTitle = this.validateTitle(title);
+    if (note.title === nextTitle) {
+      return this.getNote(note.id);
+    }
+
+    const existing = await this.findNoteByTitle(nextTitle, { includeArchived: true });
+    if (existing && existing.id !== note.id) {
+      throw new Error(`note title already exists: ${nextTitle}`);
+    }
+
+    note.title = nextTitle;
+    note.updatedAt = new Date().toISOString();
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: rename ${note.id} -> ${nextTitle}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
+    return this.getNote(note.id);
+  }
+
   async archiveNote(noteRef: string): Promise<NoteWithBodies> {
     await this.init();
     const note = await this.resolveNoteRef(noteRef, { includeArchived: true });
