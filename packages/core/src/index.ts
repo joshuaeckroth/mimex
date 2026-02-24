@@ -16,6 +16,8 @@ import type {
   SearchResult,
   SoftLinkEvent,
   SoftLinkTarget,
+  DeleteBodyInput,
+  RenameBodyInput,
   UpdateBodyInput
 } from "@mimex/shared-types";
 
@@ -197,6 +199,69 @@ export class MimexCore {
     await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
     await this.writeNoteMeta(note);
     await this.autoCommitWorkspace(`note: update body ${note.title}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
+
+    return this.getNote(note.id);
+  }
+
+  async renameBody(input: RenameBodyInput): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(input.noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${input.noteRef}`);
+    }
+    if (isArchived(note)) {
+      throw new Error(`note is archived: ${note.title}`);
+    }
+
+    const body = note.bodies.find((entry) => entry.id === input.bodyId);
+    if (!body) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
+
+    const nextLabel = this.validateBodyLabel(input.label);
+    if (body.label === nextLabel) {
+      return this.getNote(note.id);
+    }
+
+    const now = new Date().toISOString();
+    body.label = nextLabel;
+    body.updatedAt = now;
+    note.updatedAt = now;
+
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: rename body ${note.title} [${body.id}] -> ${nextLabel}`);
+    this.cacheNoteMeta(note);
+    void this.persistNotesCache();
+
+    return this.getNote(note.id);
+  }
+
+  async deleteBody(input: DeleteBodyInput): Promise<NoteWithBodies> {
+    await this.init();
+    const note = await this.resolveNoteRef(input.noteRef, { includeArchived: true });
+
+    if (!note) {
+      throw new Error(`note not found: ${input.noteRef}`);
+    }
+    if (isArchived(note)) {
+      throw new Error(`note is archived: ${note.title}`);
+    }
+
+    const bodyIndex = note.bodies.findIndex((entry) => entry.id === input.bodyId);
+    if (bodyIndex < 0) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
+
+    note.bodies.splice(bodyIndex, 1);
+    const now = new Date().toISOString();
+    note.updatedAt = now;
+
+    await rm(path.join(this.bodiesDir(note.id), `${input.bodyId}.md`), { force: true });
+    await this.writeNoteMeta(note);
+    await this.autoCommitWorkspace(`note: delete body ${note.title} [${input.bodyId}]`);
     this.cacheNoteMeta(note);
     void this.persistNotesCache();
 
@@ -754,6 +819,14 @@ export class MimexCore {
     return trimmed;
   }
 
+  private validateBodyLabel(label: string): string {
+    const trimmed = label.trim();
+    if (!trimmed) {
+      throw new Error("body label is required");
+    }
+    return trimmed;
+  }
+
   private notesDir(): string {
     return path.join(this.workspacePath, NOTES_DIR);
   }
@@ -786,15 +859,18 @@ export class MimexCore {
       return;
     }
 
-    this.runGit(["add", "-A"]);
-    const diffExit = this.runGit(["diff", "--cached", "--quiet"]);
-    if (diffExit === 1) {
+    if (this.runGit(["add", "-A"]) !== 0) {
+      return;
+    }
+    const status = this.runGitWithOutput(["status", "--porcelain"]);
+    if (status.exitCode === 0 && status.stdout.trim().length > 0) {
       this.runGit([
         "-c",
         "user.name=Mimex",
         "-c",
         "user.email=mimex@local",
         "commit",
+        "--no-gpg-sign",
         "-m",
         message
       ]);
@@ -806,12 +882,23 @@ export class MimexCore {
       cwd: this.workspacePath,
       encoding: "utf8"
     });
-
-    if (result.error) {
-      return -1;
+    if (typeof result.status === "number") {
+      return result.status;
     }
+    return -1;
+  }
 
-    return result.status ?? -1;
+  private runGitWithOutput(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+    const result = spawnSync("git", args, {
+      cwd: this.workspacePath,
+      encoding: "utf8"
+    });
+    const errorText = result.error?.message ?? "";
+    return {
+      exitCode: typeof result.status === "number" ? result.status : -1,
+      stdout: result.stdout ?? "",
+      stderr: `${result.stderr ?? ""}${errorText ? `\n${errorText}` : ""}`.trim()
+    };
   }
 }
 

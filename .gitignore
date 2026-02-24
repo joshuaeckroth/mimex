@@ -17,3 +17,4 @@ coverage/
 
 # Local deploy/runtime artifacts
 *.tgz
+data/

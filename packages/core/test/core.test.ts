@@ -1,17 +1,37 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { MimexCore, extractHardLinks } from "../src/index.js";
+import { MimexCore, extractHardLinks, type MimexCoreOptions } from "../src/index.js";
 
 const tempDirs: string[] = [];
 
-async function newCore() {
+async function newWorkspaceCore(options: MimexCoreOptions = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mimex-core-test-"));
   tempDirs.push(dir);
-  const core = new MimexCore(dir, { autoCommit: false });
+  const core = new MimexCore(dir, {
+    autoCommit: false,
+    ...options
+  });
   await core.init();
+  return { core, dir };
+}
+
+async function newCore(options: MimexCoreOptions = {}) {
+  const { core } = await newWorkspaceCore(options);
   return core;
+}
+
+function runGit(cwd: string, args: string[]): string {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+  }
+  return (result.stdout ?? "").trim();
 }
 
 afterEach(async () => {
@@ -132,6 +152,77 @@ describe("MimexCore", () => {
     });
 
     expect(updated.bodies[0]?.markdown).toBe("after edit");
+  });
+
+  it("renames note titles and prevents duplicate titles", async () => {
+    const core = await newCore();
+    const first = await core.createNote({ title: "First Note", markdown: "body" });
+    await core.createNote({ title: "Second Note", markdown: "body" });
+
+    const renamed = await core.renameNote(first.note.id, "Renamed First");
+    expect(renamed.note.id).toBe(first.note.id);
+    expect(renamed.note.title).toBe("Renamed First");
+
+    const byNewTitle = await core.getNote("Renamed First");
+    expect(byNewTitle.note.id).toBe(first.note.id);
+
+    await expect(core.renameNote(first.note.id, "Second Note")).rejects.toThrow(/already exists/i);
+  });
+
+  it("renames and deletes a single body", async () => {
+    const { core, dir } = await newWorkspaceCore();
+    const created = await core.createNote({ title: "Body Ops", markdown: "first", label: "main" });
+    const withSecond = await core.addBody({ noteRef: created.note.id, markdown: "second", label: "secondary" });
+    const secondary = withSecond.note.bodies.find((body) => body.label === "secondary");
+    expect(secondary?.id).toBeTruthy();
+
+    const renamed = await core.renameBody({
+      noteRef: created.note.id,
+      bodyId: secondary?.id ?? "",
+      label: "renamed-secondary"
+    });
+    expect(renamed.note.bodies.map((body) => body.label)).toContain("renamed-secondary");
+
+    const bodyFilePath = path.join(dir, "notes", created.note.id, "bodies", `${secondary?.id}.md`);
+    await access(bodyFilePath);
+
+    const afterDelete = await core.deleteBody({
+      noteRef: created.note.id,
+      bodyId: secondary?.id ?? ""
+    });
+    expect(afterDelete.note.bodies.find((body) => body.id === secondary?.id)).toBeUndefined();
+    await expect(access(bodyFilePath)).rejects.toThrow();
+  });
+
+  it("creates real git commits when autoCommit is enabled", async () => {
+    const { core, dir } = await newWorkspaceCore({ autoCommit: true });
+    runGit(dir, ["config", "user.name", "Mimex Test"]);
+    runGit(dir, ["config", "user.email", "mimex-test@example.com"]);
+    runGit(dir, ["config", "commit.gpgsign", "false"]);
+
+    const created = await core.createNote({ title: "Commit Note", markdown: "first", label: "main" });
+    const withSecond = await core.addBody({ noteRef: created.note.id, markdown: "second", label: "secondary" });
+    const secondaryBody = withSecond.note.bodies.find((body) => body.label === "secondary");
+    expect(secondaryBody?.id).toBeTruthy();
+
+    await core.renameBody({
+      noteRef: created.note.id,
+      bodyId: secondaryBody?.id ?? "",
+      label: "secondary-renamed"
+    });
+    await core.deleteBody({
+      noteRef: created.note.id,
+      bodyId: secondaryBody?.id ?? ""
+    });
+    await core.renameNote(created.note.id, "Commit Note Renamed");
+
+    const subjects = runGit(dir, ["log", "--pretty=%s"]).split("\n").filter(Boolean);
+    expect(subjects).toHaveLength(5);
+    expect(subjects).toContain("note: create Commit Note");
+    expect(subjects).toContain("note: add body Commit Note");
+    expect(subjects.some((line) => line.startsWith("note: rename body Commit Note"))).toBe(true);
+    expect(subjects.some((line) => line.startsWith("note: delete body Commit Note"))).toBe(true);
+    expect(subjects).toContain("note: rename commit-note -> Commit Note Renamed");
   });
 
   it("persists notes cache to configured cacheDir", async () => {

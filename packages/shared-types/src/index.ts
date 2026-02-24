@@ -83,3 +83,14 @@ export interface UpdateBodyInput {
   bodyId: string;
   markdown: string;
 }
+
+export interface RenameBodyInput {
+  noteRef: string;
+  bodyId: string;
+  label: string;
+}
+
+export interface DeleteBodyInput {
+  noteRef: string;
+  bodyId: string;
+}

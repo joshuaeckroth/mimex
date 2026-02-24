@@ -335,6 +335,31 @@ program
   });
 
 program
+  .command("body:rename")
+  .description("rename a body label")
+  .argument("<noteRef>", "note id or title")
+  .argument("<bodyId>", "body id")
+  .argument("<label>", "new body label")
+  .action(async (noteRef, bodyId, label) => {
+    await withCore(async (core) => {
+      const note = await core.renameBody({ noteRef, bodyId, label });
+      printOutput(note, renderNote(note), porcelainNote(note));
+    });
+  });
+
+program
+  .command("body:delete")
+  .description("delete a body from a note")
+  .argument("<noteRef>", "note id or title")
+  .argument("<bodyId>", "body id")
+  .action(async (noteRef, bodyId) => {
+    await withCore(async (core) => {
+      const note = await core.deleteBody({ noteRef, bodyId });
+      printOutput(note, renderNote(note), porcelainNote(note));
+    });
+  });
+
+program
   .command("search")
   .description("search note titles and bodies")
   .argument("<query>", "search query")

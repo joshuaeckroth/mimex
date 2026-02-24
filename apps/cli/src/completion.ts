@@ -11,6 +11,8 @@ const COMMANDS = [
   "note:restore",
   "note:delete",
   "body:add",
+  "body:rename",
+  "body:delete",
   "search",
   "follow",
   "import:notion",
@@ -30,6 +32,12 @@ function bashCompletionBody(): string {
   return `
 __mimex_cli_note_ids() {
   mimex-cli --porcelain note:list --all 2>/dev/null | awk -F'\\t' '$1=="NOTE" {print $2}'
+}
+
+__mimex_cli_body_ids() {
+  local note_ref="$1"
+  [ -z "$note_ref" ] && return
+  mimex-cli --porcelain note:get "$note_ref" 2>/dev/null | awk -F'\\t' '$1=="BODY" {print $2}'
 }
 
 __mimex_cli_hard_links() {
@@ -115,10 +123,17 @@ _mimex_cli_complete() {
         return 0
       fi
       ;;
-    body:add)
+    body:add|body:rename|body:delete)
       if [[ "$arg_index" -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$(__mimex_cli_note_ids)" -- "$cur") )
         return 0
+      fi
+      if [[ "$arg_index" -eq 2 ]]; then
+        if [[ "$cmd" == "body:rename" || "$cmd" == "body:delete" ]]; then
+          local note_ref="\${COMP_WORDS[$((cmd_index + 1))]}"
+          COMPREPLY=( $(compgen -W "$(__mimex_cli_body_ids "$note_ref")" -- "$cur") )
+          return 0
+        fi
       fi
       ;;
     follow)
@@ -165,13 +180,21 @@ function __mimex_cli_note_ids
   mimex-cli --porcelain note:list --all 2>/dev/null | awk -F'\\t' '$1=="NOTE" {print $2}'
 end
 
+function __mimex_cli_body_ids
+  set -l note_ref $argv[1]
+  if test -z "$note_ref"
+    return
+  end
+  mimex-cli --porcelain note:get "$note_ref" 2>/dev/null | awk -F'\\t' '$1=="BODY" {print $2}'
+end
+
 complete -c mimex-cli -l workspace -s w -r
 complete -c mimex-cli -l json
 complete -c mimex-cli -l porcelain
 
 ${commandLines}
 
-complete -c mimex-cli -n '__fish_seen_subcommand_from note:get note:rename note:archive note:restore note:delete links:hard links:resolve links:follow-hard links:soft body:add follow' -f -a '(__mimex_cli_note_ids)'
+complete -c mimex-cli -n '__fish_seen_subcommand_from note:get note:rename note:archive note:restore note:delete links:hard links:resolve links:follow-hard links:soft body:add body:rename body:delete follow' -f -a '(__mimex_cli_note_ids)'
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l markdown -s m -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l markdown-file -s f -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from note:create' -l label -s l -r
@@ -180,6 +203,8 @@ complete -c mimex-cli -n '__fish_seen_subcommand_from note:list' -l all
 complete -c mimex-cli -n '__fish_seen_subcommand_from body:add' -l markdown -s m -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from body:add' -l markdown-file -s f -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from body:add' -l label -s l -r
+complete -c mimex-cli -n '__fish_seen_subcommand_from body:rename; and test (count (commandline -opc)) -eq 3' -f -a '(__mimex_cli_body_ids (commandline -opc)[3])'
+complete -c mimex-cli -n '__fish_seen_subcommand_from body:delete; and test (count (commandline -opc)) -eq 3' -f -a '(__mimex_cli_body_ids (commandline -opc)[3])'
 complete -c mimex-cli -n '__fish_seen_subcommand_from search' -l limit -s l -r
 complete -c mimex-cli -n '__fish_seen_subcommand_from search' -l all
 complete -c mimex-cli -n '__fish_seen_subcommand_from import:notion' -l query -s q -r

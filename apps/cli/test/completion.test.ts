@@ -9,6 +9,9 @@ describe("completion scripts", () => {
     expect(script).toContain("complete -F _mimex_cli_complete mimex-cli");
     expect(script).toContain("note:archive");
     expect(script).toContain("note:delete");
+    expect(script).toContain("body:rename");
+    expect(script).toContain("body:delete");
+    expect(script).toContain("__mimex_cli_body_ids");
     expect(script).toContain("import:notion");
   });
 
@@ -24,6 +27,9 @@ describe("completion scripts", () => {
     expect(script).toContain("__fish_use_subcommand");
     expect(script).toContain("note:create");
     expect(script).toContain("-l markdown");
+    expect(script).toContain("body:rename");
+    expect(script).toContain("body:delete");
+    expect(script).toContain("__mimex_cli_body_ids");
   });
 
   it("rejects unsupported shells", () => {
