@@ -80,6 +80,8 @@ interface TuiState {
   searchQuery: string;
   notes: NoteMeta[];
   selectedIndex: number;
+  notesScrollOffset: number;
+  notesScrollPinnedToSelection: boolean;
   details: NoteDetailsState;
   mode: InputMode;
   focusPane: FocusPane;
@@ -121,6 +123,9 @@ const KEY_HINTS =
   "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete, x archived, t theme, s refresh, q quit";
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
+const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
+const EDIT_ERROR_MARKER = "MIMEX_EDIT_ERROR";
+const EDIT_ERROR_LINE_RE = /^<!--\s*MIMEX_EDIT_ERROR:\s*.*-->$/;
 
 const THEMES: Record<ThemeName, ThemePalette> = {
   dark: {
@@ -213,6 +218,72 @@ function promptForMode(mode: InputMode): string {
     default:
       return "";
   }
+}
+
+function sanitizeEditErrorMessage(message: string): string {
+  return message.replace(/\r?\n/g, " ").replace(/-->/g, "-- >").trim();
+}
+
+function formatEditableNoteContent(title: string, markdown: string, errorMessage?: string): string {
+  const lines: string[] = [];
+  if (errorMessage) {
+    lines.push(`<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`);
+  }
+  lines.push(`${EDIT_TITLE_PREFIX} ${title}`);
+  lines.push("");
+  if (markdown.length > 0) {
+    lines.push(markdown);
+  }
+  return lines.join("\n");
+}
+
+function stripLeadingEditErrorComments(content: string): string {
+  return content.replace(/^(?:<!--\s*MIMEX_EDIT_ERROR:\s*.*-->\n?)*/, "");
+}
+
+function prependEditErrorComment(content: string, errorMessage: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const stripped = stripLeadingEditErrorComments(normalized);
+  const errorComment = `<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`;
+  if (stripped.length === 0) {
+    return `${errorComment}\n`;
+  }
+  return `${errorComment}\n${stripped}`;
+}
+
+function parseEditedNoteContent(content: string): { title: string; markdown: string } {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  let index = 0;
+
+  while (index < lines.length) {
+    const trimmed = (lines[index] ?? "").trim();
+    if (trimmed.length === 0 || EDIT_ERROR_LINE_RE.test(trimmed)) {
+      index += 1;
+      continue;
+    }
+
+    if (!trimmed.startsWith(EDIT_TITLE_PREFIX)) {
+      throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
+    }
+
+    const title = trimmed.slice(EDIT_TITLE_PREFIX.length).trim();
+    if (!title) {
+      throw new Error("title marker is empty");
+    }
+
+    index += 1;
+    if (index < lines.length && (lines[index] ?? "").trim().length === 0) {
+      index += 1;
+    }
+
+    return {
+      title,
+      markdown: lines.slice(index).join("\n")
+    };
+  }
+
+  throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
 }
 
 function uniqueSorted(values: string[]): string[] {
@@ -643,6 +714,8 @@ function main(): void {
     searchQuery: "",
     notes: [],
     selectedIndex: 0,
+    notesScrollOffset: 0,
+    notesScrollPinnedToSelection: true,
     details: {
       openedNote: null,
       activeBodyIndex: 0,
@@ -671,6 +744,7 @@ function main(): void {
   let bodyWindowRender: BodyRender | null = null;
   let bodyWindowStart = 0;
   let bodyWindowEnd = 0;
+  let lastNotesViewport = 1;
   let lastBodyViewport = 1;
   let lastWideSoftLinksVisible = false;
   let lastSoftLinksTextWidth = 0;
@@ -717,6 +791,13 @@ function main(): void {
       ch: " "
     }
   });
+
+  // Override built-in List mouse-wheel behavior (which changes selection).
+  // We manage notes viewport + selection explicitly.
+  notesList.removeAllListeners("element wheeldown");
+  notesList.removeAllListeners("element wheelup");
+  notesList.removeAllListeners("wheeldown");
+  notesList.removeAllListeners("wheelup");
 
   const bodyList = blessed.list({
     top: 1,
@@ -962,6 +1043,8 @@ function main(): void {
     if (listed.length === 0) {
       pendingNoteTitle = null;
       state.selectedIndex = 0;
+      state.notesScrollOffset = 0;
+      state.notesScrollPinnedToSelection = true;
       state.details = {
         openedNote: null,
         activeBodyIndex: 0,
@@ -978,6 +1061,8 @@ function main(): void {
     if (filtered.length === 0) {
       pendingNoteTitle = null;
       state.selectedIndex = 0;
+      state.notesScrollOffset = 0;
+      state.notesScrollPinnedToSelection = true;
       state.details = {
         openedNote: null,
         activeBodyIndex: 0,
@@ -999,6 +1084,8 @@ function main(): void {
     }
 
     state.selectedIndex = nextIndex;
+    state.notesScrollPinnedToSelection = true;
+    state.notesScrollOffset = nextIndex;
 
     const selectedNote = filtered[nextIndex];
     if (selectedNote) {
@@ -1066,41 +1153,70 @@ function main(): void {
     const editor = process.env.EDITOR ?? (process.platform === "win32" ? "notepad" : "vi");
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mimex-edit-"));
     const tmpPath = path.join(tmpDir, `${openedNote.note.id}-${body.id}.md`);
+    let editorContent = formatEditableNoteContent(openedNote.note.title, body.markdown);
 
     try {
-      await writeFile(tmpPath, body.markdown, "utf8");
-      setStatus(`Opening editor (${editor})...`);
-      renderUI();
+      while (true) {
+        await writeFile(tmpPath, editorContent, "utf8");
+        setStatus(`Opening editor (${editor})...`);
+        renderUI();
 
-      const screenWithAlt = screen as blessed.Widgets.Screen & { leave?: () => void; enter?: () => void };
-      screenWithAlt.leave?.();
-      const child = spawnSync(editor, [tmpPath], {
-        stdio: "inherit",
-        shell: true
-      });
-      screenWithAlt.enter?.();
+        const screenWithAlt = screen as blessed.Widgets.Screen & { leave?: () => void; enter?: () => void };
+        screenWithAlt.leave?.();
+        const child = spawnSync(editor, [tmpPath], {
+          stdio: "inherit",
+          shell: true
+        });
+        screenWithAlt.enter?.();
 
-      if (child.error) {
-        throw child.error;
-      }
+        if (child.error) {
+          throw child.error;
+        }
 
-      const edited = await readFile(tmpPath, "utf8");
-      if (edited === body.markdown) {
-        setStatus("No changes saved");
+        const edited = await readFile(tmpPath, "utf8");
+        let parsed: { title: string; markdown: string };
+        try {
+          parsed = parseEditedNoteContent(edited);
+        } catch (error) {
+          const message = (error as Error).message;
+          editorContent = prependEditErrorComment(edited, message);
+          setStatus(`Invalid format: ${message}; reopening editor`);
+          renderUI();
+          continue;
+        }
+
+        const titleChanged = parsed.title !== openedNote.note.title;
+        const markdownChanged = parsed.markdown !== body.markdown;
+        if (!titleChanged && !markdownChanged) {
+          setStatus("No changes saved");
+          renderUI();
+          return;
+        }
+
+        if (titleChanged) {
+          await core.renameNote(openedNote.note.id, parsed.title);
+        }
+
+        if (markdownChanged) {
+          await core.updateBody({
+            noteRef: openedNote.note.id,
+            bodyId: body.id,
+            markdown: parsed.markdown
+          });
+        }
+
+        detailsCache.delete(openedNote.note.id);
+        await refresh(openedNote.note.id);
+        if (titleChanged && markdownChanged) {
+          setStatus(`Saved title and body ${body.label}`);
+        } else if (titleChanged) {
+          setStatus("Saved title");
+        } else {
+          setStatus(`Saved body ${body.label}`);
+        }
         renderUI();
         return;
       }
-
-      await core.updateBody({
-        noteRef: openedNote.note.id,
-        bodyId: body.id,
-        markdown: edited
-      });
-
-      detailsCache.delete(openedNote.note.id);
-      await refresh(openedNote.note.id);
-      setStatus(`Saved body ${body.label}`);
-      renderUI();
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
@@ -1260,17 +1376,16 @@ function main(): void {
     renderUI();
   }
 
-  function moveSelectedNoteBy(delta: number): void {
+  function activateSelectedNoteAtIndex(nextIndex: number): void {
     if (state.notes.length === 0) {
       return;
     }
 
-    const next = Math.max(0, Math.min(state.notes.length - 1, state.selectedIndex + delta));
-    if (next === state.selectedIndex) {
-      return;
-    }
-
+    const next = Math.max(0, Math.min(state.notes.length - 1, nextIndex));
     state.selectedIndex = next;
+    state.notesScrollPinnedToSelection = true;
+    ensureSelectedNoteVisible(lastNotesViewport);
+
     const nextId = state.notes[next]?.id;
     if (!nextId) {
       renderUI();
@@ -1291,6 +1406,27 @@ function main(): void {
     setStatus("Loading note...");
     renderUI();
     void loadDetails(nextId, token);
+  }
+
+  function moveSelectedNoteBy(delta: number): void {
+    if (state.notes.length === 0) {
+      return;
+    }
+
+    if (!state.notesScrollPinnedToSelection) {
+      const visibleStart = clampNotesScroll(state.notesScrollOffset, lastNotesViewport);
+      const visibleEnd = Math.max(visibleStart, Math.min(state.notes.length - 1, visibleStart + lastNotesViewport - 1));
+      if (state.selectedIndex < visibleStart || state.selectedIndex > visibleEnd) {
+        state.selectedIndex = delta >= 0 ? visibleStart : visibleEnd;
+      }
+      state.notesScrollPinnedToSelection = true;
+    }
+
+    const next = Math.max(0, Math.min(state.notes.length - 1, state.selectedIndex + delta));
+    if (next === state.selectedIndex) {
+      return;
+    }
+    activateSelectedNoteAtIndex(next);
   }
 
   async function submitInput(): Promise<void> {
@@ -1316,9 +1452,15 @@ function main(): void {
         return;
       }
 
+      const deletedIndex = state.notes.findIndex((note) => note.id === pendingDeleteNote.id);
+      const preferredAfterDelete =
+        deletedIndex >= 0
+          ? (state.notes[deletedIndex + 1]?.id ?? state.notes[deletedIndex - 1]?.id)
+          : undefined;
+
       await core.deleteNote(pendingDeleteNote.id);
       detailsCache.delete(pendingDeleteNote.id);
-      await refresh();
+      await refresh(preferredAfterDelete);
       setStatus(`Deleted ${pendingDeleteNote.title}`);
       renderUI();
       return;
@@ -1450,14 +1592,40 @@ function main(): void {
     );
   }
 
-  function resolveNotesWindow(totalItems: number, viewportItems: number, selectedIndex: number): { start: number; end: number } {
+  function clampNotesScroll(offset: number, viewportItems = lastNotesViewport): number {
+    const maxNotesScroll = Math.max(0, state.notes.length - Math.max(1, viewportItems));
+    return Math.max(0, Math.min(maxNotesScroll, offset));
+  }
+
+  function setNotesScroll(offset: number): boolean {
+    const clamped = clampNotesScroll(offset);
+    if (clamped === state.notesScrollOffset) {
+      return false;
+    }
+    state.notesScrollOffset = clamped;
+    return true;
+  }
+
+  function ensureSelectedNoteVisible(viewportItems = lastNotesViewport): boolean {
+    const viewport = Math.max(1, viewportItems);
+    if (state.selectedIndex < state.notesScrollOffset) {
+      return setNotesScroll(state.selectedIndex);
+    }
+    const endExclusive = state.notesScrollOffset + viewport;
+    if (state.selectedIndex >= endExclusive) {
+      return setNotesScroll(state.selectedIndex - viewport + 1);
+    }
+    return false;
+  }
+
+  function resolveNotesWindow(totalItems: number, viewportItems: number, scrollOffset: number): { start: number; end: number } {
     if (totalItems <= 0) {
       return { start: 0, end: 0 };
     }
 
     const windowSize = Math.max(viewportItems, Math.min(totalItems, viewportItems * NOTES_RENDER_WINDOW_MULTIPLIER));
     const maxStart = Math.max(0, totalItems - windowSize);
-    const centeredStart = selectedIndex - Math.floor((windowSize - viewportItems) / 2);
+    const centeredStart = scrollOffset - Math.floor((windowSize - viewportItems) / 2);
     const start = Math.max(0, Math.min(maxStart, centeredStart));
     return { start, end: Math.min(totalItems, start + windowSize) };
   }
@@ -1475,18 +1643,20 @@ function main(): void {
     }
 
     const windowSize = Math.max(viewportItems, Math.min(totalItems, viewportItems * NOTES_RENDER_WINDOW_MULTIPLIER));
+    const visibleStart = state.notesScrollOffset;
+    const visibleEnd = Math.min(totalItems, visibleStart + viewportItems);
     const existingWindowSize = notesWindowEnd - notesWindowStart;
     const withinExistingWindow =
       notesWindowSource === state.notes &&
       existingWindowSize === windowSize &&
-      state.selectedIndex >= notesWindowStart &&
-      state.selectedIndex < notesWindowEnd;
+      visibleStart >= notesWindowStart &&
+      visibleEnd <= notesWindowEnd;
 
     if (withinExistingWindow) {
       return;
     }
 
-    const windowRange = resolveNotesWindow(totalItems, viewportItems, state.selectedIndex);
+    const windowRange = resolveNotesWindow(totalItems, viewportItems, visibleStart);
     const items = state.notes
       .slice(windowRange.start, windowRange.end)
       .map((note) => `${note.title}${note.archivedAt ? " [archived]" : ""}`);
@@ -1498,23 +1668,34 @@ function main(): void {
 
   function updateNotesViewportDisplay(): void {
     const notesViewport = Math.max(1, (typeof notesList.height === "number" ? notesList.height : 10) - 2);
+    lastNotesViewport = notesViewport;
 
     if (state.notes.length === 0) {
       state.selectedIndex = 0;
+      state.notesScrollOffset = 0;
+      state.notesScrollPinnedToSelection = true;
       syncNotesWindowItems(notesViewport);
       notesList.select(0);
+      notesList.scrollTo(0);
       return;
     }
 
     state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.notes.length - 1));
+    state.notesScrollOffset = clampNotesScroll(state.notesScrollOffset, notesViewport);
+    if (state.notesScrollPinnedToSelection) {
+      ensureSelectedNoteVisible(notesViewport);
+    }
     syncNotesWindowItems(notesViewport);
 
     const totalWindowItems = Math.max(0, notesWindowEnd - notesWindowStart);
     if (totalWindowItems > 0) {
       const localIndex = Math.max(0, Math.min(totalWindowItems - 1, state.selectedIndex - notesWindowStart));
+      const localOffset = Math.max(0, Math.min(totalWindowItems - 1, state.notesScrollOffset - notesWindowStart));
       notesList.select(localIndex);
+      notesList.scrollTo(localOffset);
     } else {
       notesList.select(0);
+      notesList.scrollTo(0);
     }
   }
 
@@ -1599,8 +1780,17 @@ function main(): void {
   function renderPaneChromeOnly(): void {
     const theme = THEMES[state.theme];
     applyPaneChrome(theme);
+    updateNotesViewportDisplay();
     updateBodyViewportDisplay();
     updateSoftLinksWideDisplay(lastWideSoftLinksVisible, lastSoftLinksTextWidth);
+
+    const cols = Math.max(80, getTerminalCols());
+    setFooterContent(cols);
+    screen.render();
+  }
+
+  function renderNotesViewportOnly(): void {
+    updateNotesViewportDisplay();
 
     const cols = Math.max(80, getTerminalCols());
     setFooterContent(cols);
@@ -1877,24 +2067,7 @@ function main(): void {
 
     if (ch === "g") {
       if (state.focusPane === "notes") {
-        if (state.notes.length > 0) {
-          state.selectedIndex = 0;
-          const noteId = state.notes[0]?.id;
-          if (noteId) {
-            rememberUnfilteredSelection(noteId);
-            const cached = detailsCache.get(noteId);
-            if (cached) {
-              applyResolvedDetails(cached);
-              renderUI();
-            } else {
-              const token = detailLoadToken + 1;
-              detailLoadToken = token;
-              setPendingNoteDetails(state.notes[0] ?? null);
-              renderUI();
-              void loadDetails(noteId, token);
-            }
-          }
-        }
+        activateSelectedNoteAtIndex(0);
       } else {
         const change = setBodyScroll(0);
         if (change.bodyIndexChanged) {
@@ -1908,24 +2081,7 @@ function main(): void {
 
     if (ch === "G") {
       if (state.focusPane === "notes") {
-        if (state.notes.length > 0) {
-          state.selectedIndex = state.notes.length - 1;
-          const noteId = state.notes[state.selectedIndex]?.id;
-          if (noteId) {
-            rememberUnfilteredSelection(noteId);
-            const cached = detailsCache.get(noteId);
-            if (cached) {
-              applyResolvedDetails(cached);
-              renderUI();
-            } else {
-              const token = detailLoadToken + 1;
-              detailLoadToken = token;
-              setPendingNoteDetails(state.notes[state.selectedIndex] ?? null);
-              renderUI();
-              void loadDetails(noteId, token);
-            }
-          }
-        }
+        activateSelectedNoteAtIndex(state.notes.length - 1);
       } else {
         const change = setBodyScroll(Math.max(0, lastBodyRender.lines.length - lastBodyViewport));
         if (change.bodyIndexChanged) {
@@ -2069,6 +2225,80 @@ function main(): void {
     }
   }
 
+  function resolveNotesIndexFromMouse(
+    data: { x?: number; y?: number },
+    clickedItem?: unknown
+  ): number | null {
+    if (clickedItem) {
+      const listApi = notesList as blessed.Widgets.ListElement & {
+        getItemIndex?: (item: unknown) => number;
+        items?: unknown[];
+      };
+      const localFromApi =
+        typeof listApi.getItemIndex === "function" ? listApi.getItemIndex(clickedItem) : (listApi.items ?? []).indexOf(clickedItem);
+      if (localFromApi >= 0) {
+        const noteIndex = notesWindowStart + localFromApi;
+        if (noteIndex >= 0 && noteIndex < state.notes.length) {
+          return noteIndex;
+        }
+      }
+    }
+
+    const withPos = notesList as blessed.Widgets.ListElement & {
+      childBase?: number;
+      lpos?: { xi: number; xl: number; yi: number; yl: number };
+    };
+    const lpos = withPos.lpos;
+    if (!lpos || typeof data.x !== "number" || typeof data.y !== "number") {
+      return null;
+    }
+
+    const contentX = data.x - lpos.xi - 1;
+    const contentY = data.y - lpos.yi - 1;
+    const contentWidth = Math.max(0, lpos.xl - lpos.xi - 1);
+    const contentHeight = Math.max(0, lpos.yl - lpos.yi - 1);
+    if (contentX < 0 || contentY < 0 || contentX >= contentWidth || contentY >= contentHeight) {
+      return null;
+    }
+
+    const localTop = Math.max(0, withPos.childBase ?? 0);
+    const noteIndex = notesWindowStart + localTop + contentY;
+    if (noteIndex < 0 || noteIndex >= state.notes.length) {
+      return null;
+    }
+
+    return noteIndex;
+  }
+
+  function handleNotesClick(data: { x?: number; y?: number }, clickedItem?: unknown): void {
+    if (state.mode !== "none") {
+      return;
+    }
+
+    const noteIndex = resolveNotesIndexFromMouse(data, clickedItem);
+    if (noteIndex === null) {
+      return;
+    }
+
+    activateSelectedNoteAtIndex(noteIndex);
+  }
+
+  function handleNotesWheel(direction: "up" | "down"): void {
+    if (state.mode !== "none") {
+      return;
+    }
+    if (state.notes.length === 0) {
+      return;
+    }
+
+    state.notesScrollPinnedToSelection = false;
+    const step = Math.max(1, Math.floor(lastNotesViewport / 3));
+    const delta = direction === "down" ? step : -step;
+    if (setNotesScroll(state.notesScrollOffset + delta)) {
+      renderNotesViewportOnly();
+    }
+  }
+
   function handleBodyClick(data: { x?: number; y?: number }): void {
     if (state.mode !== "none") {
       return;
@@ -2148,6 +2378,35 @@ function main(): void {
 
     handleMainKey(input, key);
   });
+
+  (notesList as blessed.Widgets.ListElement & { on(event: string, listener: (...args: unknown[]) => void): void }).on(
+    "element click",
+    (item: unknown, data: unknown) => {
+      handleNotesClick(data as { x?: number; y?: number }, item);
+    }
+  );
+
+  notesList.on("wheelup", () => {
+    handleNotesWheel("up");
+  });
+
+  notesList.on("wheeldown", () => {
+    handleNotesWheel("down");
+  });
+
+  (notesList as blessed.Widgets.ListElement & { on(event: string, listener: (...args: unknown[]) => void): void }).on(
+    "element wheelup",
+    () => {
+      handleNotesWheel("up");
+    }
+  );
+
+  (notesList as blessed.Widgets.ListElement & { on(event: string, listener: (...args: unknown[]) => void): void }).on(
+    "element wheeldown",
+    () => {
+      handleNotesWheel("down");
+    }
+  );
 
   bodyList.on("click", (data: unknown) => {
     handleBodyClick(data as { x?: number; y?: number });
