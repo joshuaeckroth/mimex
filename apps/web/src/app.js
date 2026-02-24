@@ -1,3 +1,12 @@
+import {
+  buildHashState,
+  buildListRows,
+  formatEditableNoteContent,
+  parseEditedNoteContent,
+  parseHashState as parseHashStateFromHash,
+  prependEditErrorComment
+} from "./state-utils.js";
+
 const els = {
   appShell: document.querySelector(".app-shell"),
   userId: document.querySelector("#userId"),
@@ -37,10 +46,6 @@ const state = {
   wide: false,
   sidebarOpen: false
 };
-
-const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
-const EDIT_ERROR_MARKER = "MIMEX_EDIT_ERROR";
-const EDIT_ERROR_LINE_RE = /^<!--\s*MIMEX_EDIT_ERROR:\s*.*-->$/;
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
@@ -131,30 +136,7 @@ function initUiPrefs() {
 }
 
 function parseHashState() {
-  const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
-  if (!raw) {
-    return { noteId: null, query: null, includeArchived: null };
-  }
-
-  if (!raw.includes("=") && !raw.includes("&")) {
-    try {
-      return { noteId: decodeURIComponent(raw), query: null, includeArchived: null };
-    } catch {
-      return { noteId: raw, query: null, includeArchived: null };
-    }
-  }
-
-  const params = new URLSearchParams(raw);
-  const noteId = (params.get("note") || "").trim() || null;
-  const query = params.has("q") ? (params.get("q") ?? "") : null;
-
-  let includeArchived = null;
-  if (params.has("archived")) {
-    const archivedRaw = (params.get("archived") || "").trim().toLowerCase();
-    includeArchived = archivedRaw === "1" || archivedRaw === "true" || archivedRaw === "yes";
-  }
-
-  return { noteId, query, includeArchived };
+  return parseHashStateFromHash(window.location.hash);
 }
 
 function applyInitialHashState() {
@@ -170,19 +152,11 @@ function applyInitialHashState() {
 }
 
 function writeHashState() {
-  const params = new URLSearchParams();
-  const query = els.searchInput.value.trim();
-  if (query) {
-    params.set("q", query);
-  }
-  if (els.includeArchived.checked) {
-    params.set("archived", "1");
-  }
-  if (state.selectedNoteId) {
-    params.set("note", state.selectedNoteId);
-  }
-
-  const hash = params.toString();
+  const hash = buildHashState({
+    query: els.searchInput.value,
+    includeArchived: els.includeArchived.checked,
+    noteId: state.selectedNoteId
+  });
   const next = `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ""}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) {
@@ -242,89 +216,12 @@ function formatDate(ts) {
   }
 }
 
-function sanitizeEditErrorMessage(message) {
-  return String(message || "")
-    .replace(/\r?\n/g, " ")
-    .replace(/-->/g, "-- >")
-    .trim();
-}
-
-function formatEditableNoteContent(title, markdown, errorMessage) {
-  const lines = [];
-  if (errorMessage) {
-    lines.push(`<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`);
-  }
-  lines.push(`${EDIT_TITLE_PREFIX} ${String(title || "").trim()}`);
-  lines.push("");
-  if (markdown) {
-    lines.push(String(markdown));
-  }
-  return lines.join("\n");
-}
-
-function stripLeadingEditErrorComments(content) {
-  return String(content || "").replace(/^(?:<!--\s*MIMEX_EDIT_ERROR:\s*.*-->\n?)*/, "");
-}
-
-function prependEditErrorComment(content, errorMessage) {
-  const normalized = String(content || "").replace(/\r\n/g, "\n");
-  const stripped = stripLeadingEditErrorComments(normalized);
-  const comment = `<!-- ${EDIT_ERROR_MARKER}: ${sanitizeEditErrorMessage(errorMessage)} -->`;
-  if (!stripped) {
-    return `${comment}\n`;
-  }
-  return `${comment}\n${stripped}`;
-}
-
-function parseEditedNoteContent(content) {
-  const normalized = String(content || "").replace(/\r\n/g, "\n");
-  const lines = normalized.split("\n");
-  let index = 0;
-
-  while (index < lines.length) {
-    const trimmed = (lines[index] || "").trim();
-    if (!trimmed || EDIT_ERROR_LINE_RE.test(trimmed)) {
-      index += 1;
-      continue;
-    }
-    if (!trimmed.startsWith(EDIT_TITLE_PREFIX)) {
-      throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
-    }
-    const title = trimmed.slice(EDIT_TITLE_PREFIX.length).trim();
-    if (!title) {
-      throw new Error("title marker is empty");
-    }
-
-    index += 1;
-    if (index < lines.length && !(lines[index] || "").trim()) {
-      index += 1;
-    }
-
-    return {
-      title,
-      markdown: lines.slice(index).join("\n")
-    };
-  }
-
-  throw new Error(`missing title marker (${EDIT_TITLE_PREFIX} <title>) at top of file`);
-}
-
 function listRows() {
-  if (state.searchResults.length > 0 || els.searchInput.value.trim()) {
-    return state.searchResults.map((result) => ({
-      id: result.noteId,
-      title: result.title,
-      subtitle: `score ${result.score}`,
-      archivedAt: null
-    }));
-  }
-
-  return state.notes.map((note) => ({
-    id: note.id,
-    title: note.title,
-    subtitle: `${note.bodies.length} bodies`,
-    archivedAt: note.archivedAt
-  }));
+  return buildListRows({
+    query: els.searchInput.value,
+    searchResults: state.searchResults,
+    notes: state.notes
+  });
 }
 
 function updateCachedNoteMeta(nextNoteMeta) {
@@ -697,6 +594,33 @@ async function saveBody(noteId, bodyId, markdown) {
   return updated;
 }
 
+async function renameBodyLabel(noteId, bodyId, label) {
+  const updated = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/bodies/${encodeURIComponent(bodyId)}/label`, {
+    method: "PUT",
+    body: JSON.stringify({ label })
+  });
+
+  state.selectedNote = updated;
+  state.selectedNoteId = updated.note.id;
+  updateCachedNoteMeta(updated.note);
+  renderNoteList();
+  return updated;
+}
+
+async function deleteBody(noteId, bodyId) {
+  const updated = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/bodies/${encodeURIComponent(bodyId)}`, {
+    method: "DELETE"
+  });
+
+  state.selectedNote = updated;
+  state.selectedNoteId = updated.note.id;
+  const bodyCount = updated.bodies?.length ?? 0;
+  state.activeBodyIndex = bodyCount === 0 ? 0 : Math.min(state.activeBodyIndex, bodyCount - 1);
+  updateCachedNoteMeta(updated.note);
+  renderNoteList();
+  return updated;
+}
+
 async function renameNote(noteId, title) {
   const updated = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/title`, {
     method: "PUT",
@@ -824,7 +748,77 @@ function renderNoteDetail() {
         renderNoteDetail();
       });
 
-      labelActions.append(editBtn);
+      const renameLabelBtn = document.createElement("button");
+      renameLabelBtn.type = "button";
+      renameLabelBtn.className = "body-label-btn";
+      renameLabelBtn.textContent = "rename label";
+      renameLabelBtn.disabled = isSaving;
+      renameLabelBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const next = window.prompt("New body label:", body.label);
+        if (next === null) {
+          return;
+        }
+        const trimmed = next.trim();
+        if (!trimmed) {
+          setStatus("Body label is required", true);
+          return;
+        }
+        if (trimmed === body.label) {
+          setStatus("Body label unchanged");
+          return;
+        }
+
+        state.savingBodyIds.add(bodyKey);
+        renderNoteDetail();
+        void (async () => {
+          try {
+            const updated = await renameBodyLabel(note.note.id, body.id, trimmed);
+            setStatus(`Renamed body label on ${updated.note.title}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatus(`Failed to rename body label: ${message}`, true);
+          } finally {
+            state.savingBodyIds.delete(bodyKey);
+            renderNoteDetail();
+          }
+        })();
+      });
+
+      const deleteBodyBtn = document.createElement("button");
+      deleteBodyBtn.type = "button";
+      deleteBodyBtn.className = "body-label-btn";
+      deleteBodyBtn.textContent = "delete body";
+      deleteBodyBtn.disabled = isSaving;
+      deleteBodyBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (!window.confirm(`Delete body "${body.label}" permanently?`)) {
+          return;
+        }
+
+        state.savingBodyIds.add(bodyKey);
+        renderNoteDetail();
+        void (async () => {
+          try {
+            const updated = await deleteBody(note.note.id, body.id);
+            setStatus(`Deleted body from ${updated.note.title}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatus(`Failed to delete body: ${message}`, true);
+          } finally {
+            state.savingBodyIds.delete(bodyKey);
+            state.editingBodyIds.delete(bodyKey);
+            state.bodyDrafts.delete(bodyKey);
+            renderNoteDetail();
+          }
+        })();
+      });
+
+      labelActions.append(editBtn, renameLabelBtn, deleteBodyBtn);
       label.append(labelActions);
     }
 
@@ -1287,6 +1281,37 @@ async function followFromPrompt() {
   await followInternalLink(sourceId, target);
 }
 
+async function deleteActiveBody() {
+  const note = state.selectedNote;
+  if (!note || note.bodies.length === 0) {
+    setStatus("No note body selected");
+    return;
+  }
+
+  const body = note.bodies[state.activeBodyIndex];
+  if (!body) {
+    setStatus("No note body selected");
+    return;
+  }
+
+  if (!window.confirm(`Delete body "${body.label}" permanently?`)) {
+    return;
+  }
+
+  const bodyKey = `${note.note.id}:${body.id}`;
+  state.savingBodyIds.add(bodyKey);
+  renderNoteDetail();
+  try {
+    const updated = await deleteBody(note.note.id, body.id);
+    setStatus(`Deleted body from ${updated.note.title}`);
+  } finally {
+    state.savingBodyIds.delete(bodyKey);
+    state.editingBodyIds.delete(bodyKey);
+    state.bodyDrafts.delete(bodyKey);
+    renderNoteDetail();
+  }
+}
+
 async function archiveSelectedNote() {
   const selectedId = state.selectedNote?.note.id ?? state.selectedNoteId;
   if (!selectedId) {
@@ -1529,6 +1554,14 @@ function onGlobalKeydown(event) {
   if (event.key === "D") {
     event.preventDefault();
     void runCommand(deleteSelectedNote);
+    return;
+  }
+
+  if (event.key === "d") {
+    event.preventDefault();
+    if (state.focusPane === "body") {
+      void runCommand(deleteActiveBody);
+    }
     return;
   }
 
