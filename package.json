@@ -6,6 +6,10 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
+    "desktop:prepare": "pnpm --filter @mimex/shared-types build && pnpm --filter @mimex/core build && pnpm --filter @mimex/api build && pnpm --filter @mimex/web build",
+    "desktop:dev": "pnpm run desktop:prepare && pnpm --filter @mimex/desktop dev",
+    "desktop:start": "pnpm --filter @mimex/desktop start",
+    "desktop:nsis": "pnpm run desktop:prepare && pnpm --filter @mimex/desktop dist:win",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "clean": "turbo run clean"

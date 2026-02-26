@@ -1,0 +1,44 @@
+{
+  "name": "@mimex/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mimex desktop app",
+  "author": "Mimex",
+  "main": "src/main.mjs",
+  "scripts": {
+    "build": "node -e \"console.log('desktop main is source-only')\"",
+    "build:runtime": "node ./scripts/prepare-runtime.mjs",
+    "dev": "electron .",
+    "start": "electron .",
+    "dist:win": "pnpm run build:runtime && node ./scripts/dist-win.mjs",
+    "typecheck": "echo 'no typecheck for desktop yet'",
+    "test": "echo 'no desktop tests yet'"
+  },
+  "devDependencies": {
+    "electron": "^31.7.6",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "dev.mimex.desktop",
+    "productName": "Mimex",
+    "directories": {
+      "output": "release"
+    },
+    "asar": false,
+    "files": [
+      "src/**/*",
+      "runtime/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "Mimex-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
