@@ -9,7 +9,7 @@ const WEB_PORT = Number(process.env.MIMEX_DESKTOP_WEB_PORT ?? "4173");
 const STARTUP_TIMEOUT_MS = 20_000;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const runtimeRoot = app.isPackaged ? path.join(process.resourcesPath, "runtime") : await findRepoRoot(here);
+const runtimeRoot = app.isPackaged ? path.resolve(here, "..", "runtime") : await findRepoRoot(here);
 const apiEntry = path.join(runtimeRoot, "apps", "api", "dist", "server.js");
 const webEntry = path.join(runtimeRoot, "apps", "web", "scripts", "server.mjs");
 const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
