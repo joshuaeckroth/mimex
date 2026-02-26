@@ -18,6 +18,8 @@ const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
 
 const services = [];
 let shuttingDown = false;
+let servicesReady = false;
+let mainWindow = null;
 
 function serviceLog(name, message) {
   process.stdout.write(`[desktop:${name}] ${message}\n`);
@@ -54,6 +56,15 @@ function spawnService(name, cmd, args, env) {
 
     const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     dialog.showErrorBox("Mimex Desktop", `${name} process stopped unexpectedly (${reason}).`);
+    void app.quit();
+  });
+
+  child.on("error", (error) => {
+    if (shuttingDown) {
+      return;
+    }
+
+    dialog.showErrorBox("Mimex Desktop", `${name} process failed to start: ${error.message}`);
     void app.quit();
   });
 
@@ -143,16 +154,64 @@ async function startServices() {
     API_ORIGIN: `http://127.0.0.1:${API_PORT}`
   });
   await waitForHttp(`http://127.0.0.1:${WEB_PORT}/healthz`, STARTUP_TIMEOUT_MS);
+  servicesReady = true;
 }
 
-async function createMainWindow() {
-  const mainWindow = new BrowserWindow({
+function loadingPageHtml() {
+  return `
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mimex</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: Segoe UI, Tahoma, sans-serif;
+        background: #f5f7fa;
+        color: #1f2937;
+      }
+      .card {
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 20px 24px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.07);
+      }
+      .title {
+        margin: 0 0 8px 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      .sub {
+        margin: 0;
+        font-size: 14px;
+        color: #4b5563;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <p class="title">Starting Mimex...</p>
+      <p class="sub">Booting local API and Web UI.</p>
+    </div>
+  </body>
+</html>
+`;
+}
+
+function createMainWindow() {
+  const window = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 960,
     minHeight: 640,
     autoHideMenuBar: true,
-    show: false,
+    show: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -160,11 +219,19 @@ async function createMainWindow() {
     }
   });
 
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+    if (shuttingDown) {
+      return;
+    }
+    dialog.showErrorBox("Mimex Desktop", `Failed to load UI (${errorCode}): ${errorDescription}`);
   });
 
-  await mainWindow.loadURL(`http://127.0.0.1:${WEB_PORT}`);
+  void window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingPageHtml())}`);
+  return window;
+}
+
+async function loadMainUi(window) {
+  await window.loadURL(`http://127.0.0.1:${WEB_PORT}`);
 }
 
 app.on("window-all-closed", () => {
@@ -183,7 +250,10 @@ app.on("quit", () => {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    void createMainWindow();
+    mainWindow = createMainWindow();
+    if (servicesReady) {
+      void loadMainUi(mainWindow);
+    }
   }
 });
 
@@ -199,8 +269,9 @@ process.on("SIGTERM", () => {
 
 try {
   await app.whenReady();
+  mainWindow = createMainWindow();
   await startServices();
-  await createMainWindow();
+  await loadMainUi(mainWindow);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   dialog.showErrorBox("Mimex Desktop", message);
