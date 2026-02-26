@@ -1,9 +1,7 @@
-import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
-import http from "node:http";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog } from "electron";
 
 const API_PORT = Number(process.env.MIMEX_DESKTOP_API_PORT ?? "8080");
@@ -16,106 +14,30 @@ const apiEntry = path.join(runtimeRoot, "apps", "api", "dist", "server.js");
 const webEntry = path.join(runtimeRoot, "apps", "web", "scripts", "server.mjs");
 const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
 
-const services = [];
 let shuttingDown = false;
 let servicesReady = false;
 let mainWindow = null;
-
-function serviceLog(name, message) {
-  process.stdout.write(`[desktop:${name}] ${message}\n`);
-}
-
-function spawnService(name, cmd, args, env) {
-  const child = spawn(cmd, args, {
-    cwd: runtimeRoot,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...env },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true
-  });
-
-  services.push({ name, child });
-
-  child.stdout.on("data", (chunk) => {
-    const text = chunk.toString().trim();
-    if (text) {
-      serviceLog(name, text);
-    }
-  });
-
-  child.stderr.on("data", (chunk) => {
-    const text = chunk.toString().trim();
-    if (text) {
-      serviceLog(name, text);
-    }
-  });
-
-  child.on("exit", (code, signal) => {
-    if (shuttingDown) {
-      return;
-    }
-
-    const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
-    dialog.showErrorBox("Mimex Desktop", `${name} process stopped unexpectedly (${reason}).`);
-    void app.quit();
-  });
-
-  child.on("error", (error) => {
-    if (shuttingDown) {
-      return;
-    }
-
-    dialog.showErrorBox("Mimex Desktop", `${name} process failed to start: ${error.message}`);
-    void app.quit();
-  });
-
-  return child;
-}
-
-function stopServices() {
-  shuttingDown = true;
-
-  for (const { child } of services) {
-    if (!child.killed) {
-      child.kill();
-    }
-  }
-}
+let apiModule = null;
+let webServer = null;
 
 function wait(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function checkHttp(url) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
-      const statusCode = res.statusCode ?? 500;
-      res.resume();
-      if (statusCode >= 200 && statusCode < 500) {
-        resolve();
-        return;
-      }
-      reject(new Error(`Unexpected status ${statusCode}`));
-    });
-
-    req.setTimeout(1_000, () => {
-      req.destroy(new Error("timed out"));
-    });
-
-    req.on("error", reject);
-  });
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitForHttp(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+
   while (Date.now() < deadline) {
     try {
-      await checkHttp(url);
-      return;
+      const response = await fetch(url);
+      if (response.status >= 200 && response.status < 500) {
+        return;
+      }
     } catch {
-      await wait(250);
+      // retry
     }
+
+    await wait(250);
   }
 
   throw new Error(`Timed out waiting for ${url}`);
@@ -137,24 +59,56 @@ async function assertRequiredFiles() {
 
 async function startServices() {
   await assertRequiredFiles();
+
   const defaultWorkspaceRoot = app.isPackaged
     ? path.join(app.getPath("userData"), "workspaces")
     : path.join(runtimeRoot, "data", "workspaces");
   const workspaceRoot = process.env.MIMEX_WORKSPACE_ROOT ?? defaultWorkspaceRoot;
 
-  spawnService("api", process.execPath, [apiEntry], {
-    HOST: "127.0.0.1",
-    PORT: String(API_PORT),
-    MIMEX_WORKSPACE_ROOT: workspaceRoot
-  });
+  process.env.HOST = "127.0.0.1";
+  process.env.PORT = String(API_PORT);
+  process.env.MIMEX_WORKSPACE_ROOT = workspaceRoot;
+
+  apiModule = await import(pathToFileURL(apiEntry).href);
+  if (typeof apiModule.start !== "function") {
+    throw new Error("API module is missing start()");
+  }
+  await apiModule.start();
   await waitForHttp(`http://127.0.0.1:${API_PORT}/healthz`, STARTUP_TIMEOUT_MS);
 
-  spawnService("web", process.execPath, [webEntry, "--root=dist", `--port=${WEB_PORT}`], {
-    HOST: "127.0.0.1",
-    API_ORIGIN: `http://127.0.0.1:${API_PORT}`
+  const webModule = await import(pathToFileURL(webEntry).href);
+  if (typeof webModule.startWebServer !== "function") {
+    throw new Error("Web module is missing startWebServer()");
+  }
+
+  webServer = await webModule.startWebServer({
+    host: "127.0.0.1",
+    port: WEB_PORT,
+    rootName: "dist",
+    apiOrigin: `http://127.0.0.1:${API_PORT}`
   });
   await waitForHttp(`http://127.0.0.1:${WEB_PORT}/healthz`, STARTUP_TIMEOUT_MS);
   servicesReady = true;
+}
+
+async function stopServices() {
+  shuttingDown = true;
+
+  if (webServer) {
+    const serverToClose = webServer;
+    webServer = null;
+    await new Promise((resolve) => {
+      serverToClose.close(() => resolve());
+    });
+  }
+
+  if (apiModule?.app?.close) {
+    try {
+      await apiModule.app.close();
+    } catch {
+      // ignore shutdown errors
+    }
+  }
 }
 
 function loadingPageHtml() {
@@ -241,11 +195,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  stopServices();
-});
-
-app.on("quit", () => {
-  stopServices();
+  void stopServices();
 });
 
 app.on("activate", () => {
@@ -258,13 +208,11 @@ app.on("activate", () => {
 });
 
 process.on("SIGINT", () => {
-  stopServices();
-  process.exit(0);
+  void stopServices().finally(() => process.exit(0));
 });
 
 process.on("SIGTERM", () => {
-  stopServices();
-  process.exit(0);
+  void stopServices().finally(() => process.exit(0));
 });
 
 try {
@@ -275,7 +223,7 @@ try {
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   dialog.showErrorBox("Mimex Desktop", message);
-  stopServices();
+  await stopServices();
   void app.quit();
 }
 
