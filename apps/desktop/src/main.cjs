@@ -13,7 +13,7 @@ const STARTUP_TIMEOUT_MS = 20_000;
 app.disableHardwareAcceleration();
 
 const here = __dirname;
-const runtimeRoot = app.isPackaged ? path.resolve(here, "..", "runtime") : findRepoRootSync(here);
+const runtimeRoot = app.isPackaged ? resolvePackagedRuntimeRoot(here) : findRepoRootSync(here);
 const apiEntry = path.join(runtimeRoot, "apps", "api", "dist", "server.js");
 const webEntry = path.join(runtimeRoot, "apps", "web", "scripts", "server.mjs");
 const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
@@ -390,4 +390,19 @@ function findRepoRootSync(startDir) {
     }
     current = parent;
   }
+}
+
+function resolvePackagedRuntimeRoot(currentDir) {
+  const candidates = [
+    path.join(process.resourcesPath, "runtime"),
+    path.resolve(currentDir, "..", "runtime")
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, "apps", "api", "dist", "server.js"))) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
 }

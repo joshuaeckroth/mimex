@@ -28,8 +28,14 @@
     "asar": false,
     "files": [
       "src/**/*",
-      "runtime/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": ["nsis"],
