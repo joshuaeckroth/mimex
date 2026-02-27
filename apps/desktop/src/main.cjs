@@ -24,6 +24,14 @@ let mainWindow = null;
 let apiModule = null;
 let webServer = null;
 let logFilePath = null;
+let apiPort = API_PORT;
+let webPort = WEB_PORT;
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+  process.exit(0);
+}
 
 const bootstrapLogPath = path.join(process.env.LOCALAPPDATA ?? process.cwd(), "Mimex", "bootstrap.log");
 bootstrapLog(`process start (pid=${process.pid})`);
@@ -97,6 +105,39 @@ async function waitForHttp(url, timeoutMs) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+function isPortInUse(port, host = "127.0.0.1") {
+  return new Promise((resolve) => {
+    const tester = http
+      .createServer()
+      .once("error", (error) => {
+        const code = error?.code;
+        resolve(code === "EADDRINUSE" || code === "EACCES");
+      })
+      .once("listening", () => {
+        tester.close(() => resolve(false));
+      })
+      .listen(port, host);
+  });
+}
+
+function findEphemeralPort(host = "127.0.0.1") {
+  return new Promise((resolve, reject) => {
+    const tester = http.createServer();
+    tester.once("error", reject);
+    tester.listen(0, host, () => {
+      const address = tester.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      tester.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
 async function assertRequiredFiles() {
   try {
     await fsp.access(apiEntry);
@@ -121,8 +162,21 @@ async function startServices() {
   const workspaceRoot = process.env.MIMEX_WORKSPACE_ROOT ?? defaultWorkspaceRoot;
 
   log(`startServices: workspaceRoot=${workspaceRoot}`);
+
+  if (!process.env.MIMEX_DESKTOP_API_PORT && (await isPortInUse(apiPort))) {
+    const fallbackApiPort = await findEphemeralPort();
+    log(`startServices: api port ${apiPort} in use, switching to ${fallbackApiPort}`);
+    apiPort = fallbackApiPort;
+  }
+
+  if (!process.env.MIMEX_DESKTOP_WEB_PORT && (await isPortInUse(webPort))) {
+    const fallbackWebPort = await findEphemeralPort();
+    log(`startServices: web port ${webPort} in use, switching to ${fallbackWebPort}`);
+    webPort = fallbackWebPort;
+  }
+
   process.env.HOST = "127.0.0.1";
-  process.env.PORT = String(API_PORT);
+  process.env.PORT = String(apiPort);
   process.env.MIMEX_WORKSPACE_ROOT = workspaceRoot;
 
   log(`startServices: importing API module ${apiEntry}`);
@@ -132,7 +186,7 @@ async function startServices() {
   }
   log("startServices: starting API");
   await apiModule.start();
-  await waitForHttp(`http://127.0.0.1:${API_PORT}/healthz`, STARTUP_TIMEOUT_MS);
+  await waitForHttp(`http://127.0.0.1:${apiPort}/healthz`, STARTUP_TIMEOUT_MS);
 
   log(`startServices: importing Web module ${webEntry}`);
   const webModule = await import(pathToFileURL(webEntry).href);
@@ -143,11 +197,11 @@ async function startServices() {
   log("startServices: starting Web server");
   webServer = await webModule.startWebServer({
     host: "127.0.0.1",
-    port: WEB_PORT,
+    port: webPort,
     rootName: "dist",
-    apiOrigin: `http://127.0.0.1:${API_PORT}`
+    apiOrigin: `http://127.0.0.1:${apiPort}`
   });
-  await waitForHttp(`http://127.0.0.1:${WEB_PORT}/healthz`, STARTUP_TIMEOUT_MS);
+  await waitForHttp(`http://127.0.0.1:${webPort}/healthz`, STARTUP_TIMEOUT_MS);
   servicesReady = true;
   log("startServices: services are ready");
 }
@@ -307,7 +361,7 @@ function createMainWindow() {
 }
 
 async function loadMainUi(window) {
-  await window.loadURL(`http://127.0.0.1:${WEB_PORT}`);
+  await window.loadURL(`http://127.0.0.1:${webPort}`);
 }
 
 async function showStartupError(message) {
@@ -337,6 +391,18 @@ app.on("activate", () => {
       void loadMainUi(mainWindow);
     }
   }
+});
+
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 process.on("uncaughtException", (error) => {

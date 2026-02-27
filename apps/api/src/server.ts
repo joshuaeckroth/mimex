@@ -9,15 +9,13 @@ const workspaceRoot = process.env.MIMEX_WORKSPACE_ROOT ?? path.resolve(process.c
 export const app = buildMimexApi({ workspaceRoot, logger: true });
 
 export async function start(): Promise<void> {
-  try {
-    await app.listen({ port, host });
-  } catch (error) {
-    app.log.error(error);
-    process.exit(1);
-  }
+  await app.listen({ port, host });
 }
 
 const isMain = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  void start();
+  void start().catch((error) => {
+    app.log.error(error);
+    process.exit(1);
+  });
 }
