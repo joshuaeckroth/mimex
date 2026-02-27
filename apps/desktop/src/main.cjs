@@ -4,7 +4,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const process = require("node:process");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 
 const API_PORT = Number(process.env.MIMEX_DESKTOP_API_PORT ?? "8080");
 const WEB_PORT = Number(process.env.MIMEX_DESKTOP_WEB_PORT ?? "4173");
@@ -33,6 +33,15 @@ if (!gotSingleInstanceLock) {
   process.exit(0);
 }
 
+const KEYCHAIN_SERVICE = "mimex/git";
+let keytar = null;
+try {
+  // Optional dependency in dev; required for packaged desktop token storage.
+  keytar = require("keytar");
+} catch {
+  keytar = null;
+}
+
 const bootstrapLogPath = path.join(process.env.LOCALAPPDATA ?? process.cwd(), "Mimex", "bootstrap.log");
 bootstrapLog(`process start (pid=${process.pid})`);
 bootstrapLog(`runtimeRoot=${runtimeRoot}`);
@@ -45,6 +54,48 @@ function bootstrapLog(message) {
   } catch {
     // ignore bootstrap logging failures
   }
+}
+
+function registerKeychainIpc() {
+  ipcMain.handle("mimex:keychain:get-token", async (_event, tokenRef) => {
+    if (!keytar) {
+      return null;
+    }
+    const account = String(tokenRef ?? "").trim();
+    if (!account) {
+      return null;
+    }
+    const value = await keytar.getPassword(KEYCHAIN_SERVICE, account);
+    return value ?? null;
+  });
+
+  ipcMain.handle("mimex:keychain:set-token", async (_event, payload) => {
+    if (!keytar) {
+      throw new Error("System keychain is unavailable in this build.");
+    }
+    const account = String(payload?.tokenRef ?? "").trim();
+    const token = String(payload?.token ?? "").trim();
+    if (!account) {
+      throw new Error("tokenRef is required");
+    }
+    if (!token) {
+      throw new Error("token is required");
+    }
+    await keytar.setPassword(KEYCHAIN_SERVICE, account, token);
+    return { ok: true };
+  });
+
+  ipcMain.handle("mimex:keychain:delete-token", async (_event, tokenRef) => {
+    if (!keytar) {
+      return { ok: true };
+    }
+    const account = String(tokenRef ?? "").trim();
+    if (!account) {
+      return { ok: true };
+    }
+    await keytar.deletePassword(KEYCHAIN_SERVICE, account);
+    return { ok: true };
+  });
 }
 
 function asErrorMessage(value) {
@@ -348,7 +399,8 @@ function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      preload: path.join(__dirname, "preload.cjs")
     }
   });
 
@@ -447,6 +499,7 @@ process.on("unhandledRejection", (reason) => {
 
 async function boot() {
   await app.whenReady();
+  registerKeychainIpc();
   const logsDir = path.join(app.getPath("userData"), "logs");
   await fsp.mkdir(logsDir, { recursive: true });
   logFilePath = path.join(logsDir, "main.log");

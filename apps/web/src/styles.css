@@ -208,6 +208,10 @@ body.dialog-open {
   gap: 0.65rem;
 }
 
+.settings-dialog {
+  width: min(42rem, 100%);
+}
+
 .prompt-title {
   margin: 0;
   font-size: 0.95rem;
@@ -235,10 +239,22 @@ body.dialog-open {
   border-color: var(--line);
 }
 
+.settings-field {
+  display: grid;
+  gap: 0.28rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .prompt-actions {
   display: inline-flex;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.settings-actions {
+  justify-content: flex-start;
 }
 
 .prompt-confirm {

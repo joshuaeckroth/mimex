@@ -59,6 +59,22 @@ const followLinkSchema = z.object({
   target: z.string().min(1)
 });
 
+const gitSettingsSchema = z.object({
+  remoteUrl: z.string(),
+  branch: z.string().trim().min(1).optional(),
+  authMode: z.enum(["ssh", "https_pat"]).optional(),
+  tokenRef: z.string().trim().optional().nullable(),
+  token: z.string().optional().nullable()
+});
+
+function gitTokenFromHeader(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 export function buildMimexApi(options: MimexApiOptions = {}): FastifyInstance {
   const workspaceRoot = options.workspaceRoot ?? path.resolve(process.cwd(), "data/workspaces");
   const coreByUser = new Map<string, MimexCore>();
@@ -299,6 +315,83 @@ export function buildMimexApi(options: MimexApiOptions = {}): FastifyInstance {
       return await core.getTopSoftLinks(params.noteRef, query.data.limit ?? 10);
     } catch (error) {
       return reply.code(404).send({ error: (error as Error).message });
+    }
+  });
+
+  app.get("/api/git/settings", async (request) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    const config = await core.getGitRemoteConfig();
+    const status = await core.getGitWorkspaceStatus();
+    return {
+      remoteUrl: config.remoteUrl,
+      branch: config.branch,
+      authMode: config.authMode,
+      tokenRef: config.tokenRef,
+      hasAuth: status.hasAuth,
+      configured: status.configured
+    };
+  });
+
+  app.put("/api/git/settings", async (request, reply) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    const parsed = gitSettingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    const config = await core.updateGitRemoteConfig(parsed.data);
+    const status = await core.getGitWorkspaceStatus();
+    return {
+      remoteUrl: config.remoteUrl,
+      branch: config.branch,
+      authMode: config.authMode,
+      tokenRef: config.tokenRef,
+      hasAuth: status.hasAuth,
+      configured: status.configured
+    };
+  });
+
+  app.get("/api/git/status", async (request) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    return core.getGitWorkspaceStatus();
+  });
+
+  app.post("/api/git/pull", async (request, reply) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    try {
+      await core.gitPull({
+        token: gitTokenFromHeader(request.headers["x-mimex-git-token"])
+      });
+      const status = await core.getGitWorkspaceStatus();
+      return { ok: true, action: "pull", status };
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
+  });
+
+  app.post("/api/git/push", async (request, reply) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    try {
+      await core.gitPush({
+        token: gitTokenFromHeader(request.headers["x-mimex-git-token"])
+      });
+      const status = await core.getGitWorkspaceStatus();
+      return { ok: true, action: "push", status };
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
+  });
+
+  app.post("/api/git/sync", async (request, reply) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    try {
+      await core.gitSync({
+        token: gitTokenFromHeader(request.headers["x-mimex-git-token"])
+      });
+      const status = await core.getGitWorkspaceStatus();
+      return { ok: true, action: "sync", status };
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
     }
   });
 

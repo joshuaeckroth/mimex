@@ -20,6 +20,7 @@ const els = {
   toggleThemeBtn: document.querySelector("#toggleThemeBtn"),
   toggleWideBtn: document.querySelector("#toggleWideBtn"),
   toggleNotesBtn: document.querySelector("#toggleNotesBtn"),
+  openSettingsBtn: document.querySelector("#openSettingsBtn"),
   closeSidebarBtn: document.querySelector("#closeSidebarBtn"),
   sidebarBackdrop: document.querySelector("#sidebarBackdrop")
 };
@@ -44,8 +45,21 @@ const state = {
   bodyDrafts: new Map(),
   theme: "light",
   wide: false,
-  sidebarOpen: false
+  sidebarOpen: false,
+  git: {
+    remoteUrl: "",
+    branch: "main",
+    authMode: "ssh",
+    tokenRef: null,
+    hasAuth: true,
+    configured: false
+  }
 };
+
+const desktopBridge =
+  typeof window.mimexDesktop === "object" && window.mimexDesktop && window.mimexDesktop.isDesktop
+    ? window.mimexDesktop
+    : null;
 
 let dialogOpen = false;
 
@@ -340,6 +354,314 @@ async function apiFetch(path, options = {}) {
   }
 
   return payload;
+}
+
+function normalizeGitSettings(payload) {
+  const authMode = payload?.authMode === "https_pat" ? "https_pat" : "ssh";
+  return {
+    remoteUrl: typeof payload?.remoteUrl === "string" ? payload.remoteUrl : "",
+    branch: typeof payload?.branch === "string" && payload.branch.trim() ? payload.branch.trim() : "main",
+    authMode,
+    tokenRef: typeof payload?.tokenRef === "string" && payload.tokenRef.trim() ? payload.tokenRef.trim() : null,
+    hasAuth: Boolean(payload?.hasAuth),
+    configured: Boolean(payload?.configured)
+  };
+}
+
+function resolveTokenRef(userId) {
+  const normalizedUser = (userId || "local").trim() || "local";
+  return `mimex:${normalizedUser}`;
+}
+
+async function loadGitSettings() {
+  const payload = await apiFetch("/api/git/settings");
+  state.git = normalizeGitSettings(payload);
+}
+
+async function maybeSetDesktopToken(tokenRef, token) {
+  if (!desktopBridge?.keychain?.setGitToken) {
+    return;
+  }
+  await desktopBridge.keychain.setGitToken(tokenRef, token);
+}
+
+async function maybeGetDesktopToken(tokenRef) {
+  if (!desktopBridge?.keychain?.getGitToken) {
+    return null;
+  }
+  return desktopBridge.keychain.getGitToken(tokenRef);
+}
+
+async function maybeDeleteDesktopToken(tokenRef) {
+  if (!desktopBridge?.keychain?.deleteGitToken) {
+    return;
+  }
+  await desktopBridge.keychain.deleteGitToken(tokenRef);
+}
+
+async function apiGitFetch(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.git.authMode === "https_pat" && desktopBridge?.keychain?.getGitToken) {
+    const ref = state.git.tokenRef || resolveTokenRef(getUserId());
+    const token = await maybeGetDesktopToken(ref);
+    if (token) {
+      headers.set("x-mimex-git-token", token);
+    }
+  }
+
+  return apiFetch(path, {
+    ...options,
+    headers
+  });
+}
+
+async function runGitAction(action) {
+  const payload = await apiGitFetch(`/api/git/${action}`, { method: "POST" });
+  if (payload?.status) {
+    state.git = {
+      ...state.git,
+      ...normalizeGitSettings({
+        remoteUrl: payload.status.remoteUrl ?? state.git.remoteUrl,
+        branch: payload.status.remoteBranch ?? state.git.branch,
+        authMode: payload.status.authMode ?? state.git.authMode,
+        tokenRef: payload.status.tokenRef ?? state.git.tokenRef,
+        hasAuth: payload.status.hasAuth,
+        configured: payload.status.configured
+      })
+    };
+  }
+  setStatus(`Git ${action} succeeded`);
+}
+
+async function openSettingsMenu() {
+  if (dialogOpen) {
+    return;
+  }
+
+  try {
+    await loadGitSettings();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(`Failed to load settings: ${message}`, true);
+    return;
+  }
+
+  dialogOpen = true;
+  document.body.classList.add("dialog-open");
+
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const overlay = document.createElement("div");
+  overlay.className = "prompt-overlay";
+  const dialog = document.createElement("div");
+  dialog.className = "prompt-dialog settings-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-label", "Settings");
+
+  const titleEl = document.createElement("h3");
+  titleEl.className = "prompt-title";
+  titleEl.textContent = "Settings";
+
+  const sectionTitle = document.createElement("p");
+  sectionTitle.className = "prompt-message";
+  sectionTitle.textContent = "Git remote sync";
+
+  const remoteLabel = document.createElement("label");
+  remoteLabel.className = "settings-field";
+  remoteLabel.textContent = "Remote URL";
+  const remoteInput = document.createElement("input");
+  remoteInput.className = "prompt-input";
+  remoteInput.type = "text";
+  remoteInput.value = state.git.remoteUrl;
+  remoteInput.placeholder = "git@github.com:you/repo.git or https://github.com/you/repo.git";
+  remoteLabel.append(remoteInput);
+
+  const branchLabel = document.createElement("label");
+  branchLabel.className = "settings-field";
+  branchLabel.textContent = "Branch";
+  const branchInput = document.createElement("input");
+  branchInput.className = "prompt-input";
+  branchInput.type = "text";
+  branchInput.value = state.git.branch || "main";
+  branchLabel.append(branchInput);
+
+  const authLabel = document.createElement("label");
+  authLabel.className = "settings-field";
+  authLabel.textContent = "Auth mode";
+  const authSelect = document.createElement("select");
+  authSelect.className = "prompt-input";
+  const sshOption = document.createElement("option");
+  sshOption.value = "ssh";
+  sshOption.textContent = "SSH";
+  const patOption = document.createElement("option");
+  patOption.value = "https_pat";
+  patOption.textContent = "HTTPS + token";
+  authSelect.append(sshOption, patOption);
+  authSelect.value = state.git.authMode;
+  authLabel.append(authSelect);
+
+  const tokenRefLabel = document.createElement("label");
+  tokenRefLabel.className = "settings-field";
+  tokenRefLabel.textContent = desktopBridge ? "Token key (keychain reference)" : "Token label";
+  const tokenRefInput = document.createElement("input");
+  tokenRefInput.className = "prompt-input";
+  tokenRefInput.type = "text";
+  tokenRefInput.value = state.git.tokenRef || resolveTokenRef(getUserId());
+  tokenRefLabel.append(tokenRefInput);
+
+  const tokenLabel = document.createElement("label");
+  tokenLabel.className = "settings-field";
+  tokenLabel.textContent = desktopBridge ? "Token (saved to keychain)" : "Token (saved in config)";
+  const tokenInput = document.createElement("input");
+  tokenInput.className = "prompt-input";
+  tokenInput.type = "password";
+  tokenInput.value = "";
+  tokenInput.placeholder = state.git.hasAuth ? "Saved. Enter to replace." : "Enter token";
+  tokenLabel.append(tokenInput);
+
+  const authHint = document.createElement("p");
+  authHint.className = "prompt-message";
+  authHint.textContent = desktopBridge
+    ? "Electron app stores HTTPS tokens in system keychain."
+    : "Browser/web mode stores token in workspace config file.";
+
+  function syncAuthVisibility() {
+    const showPat = authSelect.value === "https_pat";
+    tokenRefLabel.hidden = !showPat;
+    tokenLabel.hidden = !showPat;
+    authHint.hidden = !showPat;
+  }
+  authSelect.addEventListener("change", syncAuthVisibility);
+  syncAuthVisibility();
+
+  const actionsTop = document.createElement("div");
+  actionsTop.className = "prompt-actions";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "prompt-confirm";
+  saveBtn.textContent = "save";
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "close";
+  actionsTop.append(closeBtn, saveBtn);
+
+  const actionsGit = document.createElement("div");
+  actionsGit.className = "prompt-actions settings-actions";
+  const pullBtn = document.createElement("button");
+  pullBtn.type = "button";
+  pullBtn.textContent = "pull";
+  const pushBtn = document.createElement("button");
+  pushBtn.type = "button";
+  pushBtn.textContent = "push";
+  const syncBtn = document.createElement("button");
+  syncBtn.type = "button";
+  syncBtn.className = "prompt-confirm";
+  syncBtn.textContent = "sync";
+  actionsGit.append(pullBtn, pushBtn, syncBtn);
+
+  let closing = false;
+  const finish = () => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    dialogOpen = false;
+    document.body.classList.remove("dialog-open");
+    document.removeEventListener("keydown", onKeydown, true);
+    overlay.remove();
+    previousFocus?.focus();
+  };
+
+  const onKeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finish();
+    }
+  };
+
+  async function handleSave() {
+    saveBtn.disabled = true;
+    try {
+      const authMode = authSelect.value === "https_pat" ? "https_pat" : "ssh";
+      const remoteUrl = remoteInput.value.trim();
+      const branch = branchInput.value.trim() || "main";
+      const tokenRef = tokenRefInput.value.trim() || resolveTokenRef(getUserId());
+      const token = tokenInput.value.trim();
+
+      if (authMode === "https_pat" && desktopBridge) {
+        if (token) {
+          await maybeSetDesktopToken(tokenRef, token);
+        } else if (!state.git.hasAuth) {
+          throw new Error("Token is required for HTTPS auth.");
+        }
+      }
+
+      const payload = await apiFetch("/api/git/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          remoteUrl,
+          branch,
+          authMode,
+          tokenRef: authMode === "https_pat" ? tokenRef : null,
+          token: authMode === "https_pat" && !desktopBridge ? token : null
+        })
+      });
+
+      if (authMode === "ssh" && desktopBridge && state.git.tokenRef) {
+        await maybeDeleteDesktopToken(state.git.tokenRef);
+      }
+
+      state.git = normalizeGitSettings(payload);
+      setStatus("Saved git settings");
+      tokenInput.value = "";
+      tokenInput.placeholder = state.git.hasAuth ? "Saved. Enter to replace." : "Enter token";
+      syncAuthVisibility();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Failed to save settings: ${message}`, true);
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  async function handleGit(action, button) {
+    button.disabled = true;
+    try {
+      await runGitAction(action);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Git ${action} failed: ${message}`, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  closeBtn.addEventListener("click", finish);
+  saveBtn.addEventListener("click", () => {
+    void handleSave();
+  });
+  pullBtn.addEventListener("click", () => {
+    void handleGit("pull", pullBtn);
+  });
+  pushBtn.addEventListener("click", () => {
+    void handleGit("push", pushBtn);
+  });
+  syncBtn.addEventListener("click", () => {
+    void handleGit("sync", syncBtn);
+  });
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      finish();
+    }
+  });
+
+  dialog.append(titleEl, sectionTitle, remoteLabel, branchLabel, authLabel, tokenRefLabel, tokenLabel, authHint, actionsGit, actionsTop);
+  overlay.append(dialog);
+  document.body.append(overlay);
+  document.addEventListener("keydown", onKeydown, true);
+  remoteInput.focus();
+  remoteInput.select();
 }
 
 function formatDate(ts) {
@@ -1747,6 +2069,12 @@ function onGlobalKeydown(event) {
   if (event.key === "w") {
     event.preventDefault();
     toggleWideMode();
+    return;
+  }
+
+  if (event.key === ",") {
+    event.preventDefault();
+    void openSettingsMenu();
   }
 }
 
@@ -1772,6 +2100,9 @@ els.userId.addEventListener("change", () => {
 els.toggleThemeBtn.addEventListener("click", toggleTheme);
 els.toggleWideBtn.addEventListener("click", toggleWideMode);
 els.toggleNotesBtn.addEventListener("click", toggleSidebar);
+els.openSettingsBtn.addEventListener("click", () => {
+  void openSettingsMenu();
+});
 els.closeSidebarBtn.addEventListener("click", closeSidebar);
 els.sidebarBackdrop.addEventListener("click", closeSidebar);
 
@@ -1787,3 +2118,7 @@ initUiPrefs();
 const initialPreferredNoteId = applyInitialHashState();
 writeHashState();
 void refreshList({ preserveSelection: false, preferredNoteId: initialPreferredNoteId });
+void loadGitSettings().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  setStatus(`Failed to load git settings: ${message}`, true);
+});

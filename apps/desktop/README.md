@@ -49,6 +49,7 @@ Output:
 - This is a local desktop shell for the repo checkout.
 - `desktop:prepare` builds all runtime artifacts used by both dev and installer flows.
 - `dist:win` stages `apps/desktop/runtime` before packaging.
+- In desktop mode, HTTPS git tokens are stored in the system keychain (not workspace config).
 - Startup logs:
   - `%LOCALAPPDATA%\\Mimex\\bootstrap.log`
   - `%APPDATA%\\Mimex\\logs\\main.log`

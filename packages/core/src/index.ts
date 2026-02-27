@@ -24,6 +24,7 @@ import type {
 const NOTES_DIR = "notes";
 const SYSTEM_DIR = ".mimex";
 const SOFTLINKS_FILE = "softlinks.json";
+const GIT_SETTINGS_FILE = "git.json";
 const CORE_CACHE_VERSION = 1;
 
 interface CoreCacheSnapshot {
@@ -103,6 +104,39 @@ export interface MimexCoreOptions {
   autoCommit?: boolean;
   cacheDir?: string;
   cacheMaxAgeMs?: number;
+}
+
+export type GitAuthMode = "ssh" | "https_pat";
+
+export interface GitRemoteConfig {
+  remoteUrl: string;
+  branch: string;
+  authMode: GitAuthMode;
+  tokenRef: string | null;
+  token: string | null;
+}
+
+export interface GitRemoteConfigUpdateInput {
+  remoteUrl: string;
+  branch?: string;
+  authMode?: GitAuthMode;
+  tokenRef?: string | null;
+  token?: string | null;
+}
+
+export interface GitCommandOptions {
+  token?: string | null;
+}
+
+export interface GitWorkspaceStatus {
+  configured: boolean;
+  remoteUrl: string | null;
+  remoteBranch: string | null;
+  authMode: GitAuthMode;
+  tokenRef: string | null;
+  hasAuth: boolean;
+  currentBranch: string | null;
+  dirty: boolean;
 }
 
 export class MimexCore {
@@ -923,6 +957,178 @@ export class MimexCore {
     return path.join(this.systemDir(), SOFTLINKS_FILE);
   }
 
+  private gitSettingsPath(): string {
+    return path.join(this.systemDir(), GIT_SETTINGS_FILE);
+  }
+
+  async getGitRemoteConfig(): Promise<GitRemoteConfig> {
+    await this.init();
+    return this.readGitRemoteConfig();
+  }
+
+  async updateGitRemoteConfig(input: GitRemoteConfigUpdateInput): Promise<GitRemoteConfig> {
+    await this.init();
+
+    const previous = await this.readGitRemoteConfig();
+    const nextAuthMode = input.authMode ?? previous.authMode;
+    const next: GitRemoteConfig = {
+      remoteUrl: input.remoteUrl.trim(),
+      branch: (input.branch ?? previous.branch).trim() || "main",
+      authMode: nextAuthMode,
+      tokenRef: null,
+      token: null
+    };
+
+    if (next.authMode === "https_pat") {
+      const tokenRef = input.tokenRef ?? previous.tokenRef ?? null;
+      next.tokenRef = tokenRef && tokenRef.trim() ? tokenRef.trim() : null;
+
+      const token = input.token ?? previous.token ?? null;
+      next.token = token && token.trim() ? token.trim() : null;
+    }
+
+    await writeFile(this.gitSettingsPath(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    return next;
+  }
+
+  async getGitWorkspaceStatus(): Promise<GitWorkspaceStatus> {
+    await this.init();
+    const config = await this.readGitRemoteConfig();
+    const branchResult = this.runGitWithOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+    const statusResult = this.runGitWithOutput(["status", "--porcelain"]);
+    const currentBranch = branchResult.exitCode === 0 ? branchResult.stdout.trim() || null : null;
+    const dirty = statusResult.exitCode === 0 && statusResult.stdout.trim().length > 0;
+    const hasAuth = config.authMode === "ssh" ? true : Boolean((config.token ?? "").trim() || config.tokenRef);
+
+    return {
+      configured: config.remoteUrl.length > 0,
+      remoteUrl: config.remoteUrl.length > 0 ? config.remoteUrl : null,
+      remoteBranch: config.branch || null,
+      authMode: config.authMode,
+      tokenRef: config.tokenRef,
+      hasAuth,
+      currentBranch,
+      dirty
+    };
+  }
+
+  async gitPull(options: GitCommandOptions = {}): Promise<void> {
+    await this.init();
+    const config = await this.readGitRemoteConfig();
+    this.assertGitRemoteConfigured(config);
+    this.ensureOriginRemote(config.remoteUrl);
+
+    const authArgs = this.resolveGitAuthArgs(config, options.token ?? null);
+    const gitEnv = this.gitCommandEnv();
+    this.runGitChecked([...authArgs, "fetch", "origin", config.branch], "git fetch failed", gitEnv);
+    this.runGitChecked([...authArgs, "pull", "--rebase", "origin", config.branch], "git pull failed", gitEnv);
+  }
+
+  async gitPush(options: GitCommandOptions = {}): Promise<void> {
+    await this.init();
+    const config = await this.readGitRemoteConfig();
+    this.assertGitRemoteConfigured(config);
+    this.ensureOriginRemote(config.remoteUrl);
+
+    const authArgs = this.resolveGitAuthArgs(config, options.token ?? null);
+    const gitEnv = this.gitCommandEnv();
+    this.runGitChecked([...authArgs, "push", "origin", `HEAD:${config.branch}`], "git push failed", gitEnv);
+  }
+
+  async gitSync(options: GitCommandOptions = {}): Promise<void> {
+    await this.gitPull(options);
+    await this.gitPush(options);
+  }
+
+  private assertGitRemoteConfigured(config: GitRemoteConfig): void {
+    if (!config.remoteUrl) {
+      throw new Error("git remote URL is not configured");
+    }
+    if (!config.branch) {
+      throw new Error("git branch is not configured");
+    }
+  }
+
+  private async readGitRemoteConfig(): Promise<GitRemoteConfig> {
+    const settingsPath = this.gitSettingsPath();
+    try {
+      const raw = await readFile(settingsPath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<GitRemoteConfig>;
+      const authMode = parsed.authMode === "https_pat" ? "https_pat" : "ssh";
+
+      const normalized: GitRemoteConfig = {
+        remoteUrl: typeof parsed.remoteUrl === "string" ? parsed.remoteUrl.trim() : "",
+        branch: typeof parsed.branch === "string" && parsed.branch.trim() ? parsed.branch.trim() : "main",
+        authMode,
+        tokenRef: null,
+        token: null
+      };
+
+      if (authMode === "https_pat") {
+        normalized.tokenRef =
+          typeof parsed.tokenRef === "string" && parsed.tokenRef.trim().length > 0 ? parsed.tokenRef.trim() : null;
+        normalized.token = typeof parsed.token === "string" && parsed.token.trim().length > 0 ? parsed.token.trim() : null;
+      }
+
+      return normalized;
+    } catch {
+      return {
+        remoteUrl: "",
+        branch: "main",
+        authMode: "ssh",
+        tokenRef: null,
+        token: null
+      };
+    }
+  }
+
+  private ensureOriginRemote(remoteUrl: string): void {
+    const currentRemote = this.runGitWithOutput(["remote", "get-url", "origin"]);
+    if (currentRemote.exitCode !== 0) {
+      this.runGitChecked(["remote", "add", "origin", remoteUrl], "failed to add origin remote");
+      return;
+    }
+
+    const existingUrl = currentRemote.stdout.trim();
+    if (existingUrl !== remoteUrl) {
+      this.runGitChecked(["remote", "set-url", "origin", remoteUrl], "failed to update origin remote");
+    }
+  }
+
+  private resolveGitAuthArgs(config: GitRemoteConfig, tokenOverride: string | null): string[] {
+    if (config.authMode !== "https_pat") {
+      return [];
+    }
+
+    if (!/^https?:\/\//i.test(config.remoteUrl)) {
+      throw new Error("https_pat auth mode requires an https remote URL");
+    }
+
+    const token = (tokenOverride ?? config.token ?? "").trim();
+    if (!token) {
+      throw new Error("HTTPS token is required");
+    }
+
+    const basicAuth = Buffer.from(`x-access-token:${token}`).toString("base64");
+    return ["-c", `http.extraheader=AUTHORIZATION: basic ${basicAuth}`];
+  }
+
+  private gitCommandEnv(): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0"
+    };
+  }
+
+  private runGitChecked(args: string[], context: string, env?: NodeJS.ProcessEnv): string {
+    const result = this.runGitWithOutput(args, env);
+    if (result.exitCode !== 0) {
+      const detail = result.stderr || result.stdout || "unknown git error";
+      throw new Error(`${context}: ${detail}`);
+    }
+    return result.stdout;
+  }
+
   private async ensureGitRepo(): Promise<void> {
     if (await fileExists(path.join(this.workspacePath, ".git"))) {
       return;
@@ -953,10 +1159,11 @@ export class MimexCore {
     }
   }
 
-  private runGit(args: string[]): number {
+  private runGit(args: string[], env?: NodeJS.ProcessEnv): number {
     const result = spawnSync("git", args, {
       cwd: this.workspacePath,
-      encoding: "utf8"
+      encoding: "utf8",
+      env: env ?? process.env
     });
     if (typeof result.status === "number") {
       return result.status;
@@ -964,10 +1171,11 @@ export class MimexCore {
     return -1;
   }
 
-  private runGitWithOutput(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  private runGitWithOutput(args: string[], env?: NodeJS.ProcessEnv): { exitCode: number; stdout: string; stderr: string } {
     const result = spawnSync("git", args, {
       cwd: this.workspacePath,
-      encoding: "utf8"
+      encoding: "utf8",
+      env: env ?? process.env
     });
     const errorText = result.error?.message ?? "";
     return {
