@@ -989,6 +989,13 @@ function updateCachedNoteMeta(nextNoteMeta) {
   state.notes.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+function removeCachedNoteMeta(noteId) {
+  if (els.searchInput.value.trim()) {
+    return;
+  }
+  state.notes = state.notes.filter((entry) => entry.id !== noteId);
+}
+
 function normalizeCodeLanguage(raw) {
   const value = (raw || "").trim().toLowerCase();
   if (!value) {
@@ -1377,13 +1384,24 @@ async function moveBodyToNote(noteId, bodyId, targetNoteRef) {
     body: JSON.stringify({ targetNoteRef })
   });
 
-  updateCachedNoteMeta(moved.source.note);
+  if (moved.sourceDeleted) {
+    removeCachedNoteMeta(moved.sourceNoteId);
+  } else if (moved.source?.note) {
+    updateCachedNoteMeta(moved.source.note);
+  }
   updateCachedNoteMeta(moved.target.note);
 
-  if (state.selectedNoteId === moved.source.note.id) {
-    state.selectedNote = moved.source;
-    const sourceBodyCount = moved.source.bodies?.length ?? 0;
-    state.activeBodyIndex = sourceBodyCount === 0 ? 0 : Math.min(state.activeBodyIndex, sourceBodyCount - 1);
+  if (state.selectedNoteId === moved.sourceNoteId) {
+    if (moved.sourceDeleted) {
+      state.selectedNote = moved.target;
+      state.selectedNoteId = moved.target.note.id;
+      const movedIndex = moved.target.bodies.findIndex((entry) => entry.id === moved.movedBodyId);
+      state.activeBodyIndex = movedIndex >= 0 ? movedIndex : 0;
+    } else if (moved.source) {
+      state.selectedNote = moved.source;
+      const sourceBodyCount = moved.source.bodies?.length ?? 0;
+      state.activeBodyIndex = sourceBodyCount === 0 ? 0 : Math.min(state.activeBodyIndex, sourceBodyCount - 1);
+    }
   } else if (state.selectedNoteId === moved.target.note.id) {
     state.selectedNote = moved.target;
     const movedIndex = moved.target.bodies.findIndex((entry) => entry.id === moved.movedBodyId);

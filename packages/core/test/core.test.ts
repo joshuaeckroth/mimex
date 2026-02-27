@@ -229,9 +229,11 @@ describe("MimexCore", () => {
       targetNoteRef: target.note.id
     });
 
-    expect(moved.source.note.id).toBe(source.note.id);
+    expect(moved.sourceDeleted).toBe(false);
+    expect(moved.sourceNoteId).toBe(source.note.id);
+    expect(moved.source?.note.id).toBe(source.note.id);
     expect(moved.target.note.id).toBe(target.note.id);
-    expect(moved.source.note.bodies.find((body) => body.id === bodyToMove?.id)).toBeUndefined();
+    expect(moved.source?.note.bodies.find((body) => body.id === bodyToMove?.id)).toBeUndefined();
 
     const movedBody = moved.target.bodies.find((body) => body.id === moved.movedBodyId);
     expect(movedBody?.label).toBe("extra");
@@ -241,6 +243,35 @@ describe("MimexCore", () => {
     const targetBodyFile = path.join(dir, "notes", target.note.id, "bodies", `${moved.movedBodyId}.md`);
     await expect(access(sourceBodyFile)).rejects.toThrow();
     await access(targetBodyFile);
+  });
+
+  it("deletes the source note when moving its only body", async () => {
+    const { core, dir } = await newWorkspaceCore();
+    const source = await core.createNote({ title: "Solo Source", markdown: "only body", label: "main" });
+    const target = await core.createNote({ title: "Solo Target", markdown: "target body", label: "main" });
+    const sourceBodyId = source.note.bodies[0]?.id;
+    expect(sourceBodyId).toBeTruthy();
+
+    const moved = await core.moveBody({
+      noteRef: source.note.id,
+      bodyId: sourceBodyId ?? "",
+      targetNoteRef: target.note.id
+    });
+
+    expect(moved.sourceDeleted).toBe(true);
+    expect(moved.source).toBeNull();
+    expect(moved.sourceNoteId).toBe(source.note.id);
+    expect(moved.sourceNoteTitle).toBe("Solo Source");
+    await expect(core.getNote(source.note.id)).rejects.toThrow(/note not found/i);
+
+    const listed = await core.listNotes({ includeArchived: true });
+    expect(listed.map((note) => note.id)).not.toContain(source.note.id);
+
+    const sourceDir = path.join(dir, "notes", source.note.id);
+    await expect(access(sourceDir)).rejects.toThrow();
+
+    const movedBody = moved.target.bodies.find((body) => body.id === moved.movedBodyId);
+    expect(movedBody?.markdown).toBe("only body");
   });
 
   it("creates real git commits when autoCommit is enabled", async () => {

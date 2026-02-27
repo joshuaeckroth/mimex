@@ -103,6 +103,8 @@ describe("mimex api integration", () => {
       payload: { targetNoteRef: targetNoteId }
     });
     expect(movedBody.statusCode).toBe(200);
+    expect(movedBody.body.sourceDeleted).toBe(false);
+    expect(movedBody.body.sourceNoteId).toBe(noteId);
     expect(movedBody.body.source.note.id).toBe(noteId);
     expect(movedBody.body.target.note.id).toBe(targetNoteId);
     expect(movedBody.body.source.note.bodies).toHaveLength(1);
@@ -204,6 +206,50 @@ describe("mimex api integration", () => {
     expect(commitSubjects).toContain("note: archive Alpha Prime");
     expect(commitSubjects).toContain("note: restore Alpha Prime");
     expect(commitSubjects).toContain("note: delete Alpha Prime");
+  });
+
+  it("deletes source note when moving its only body", async () => {
+    const { app } = await newHarness();
+    const headers = { "x-user-id": "move-source-delete-user" };
+
+    const sourceCreated = await injectJson(app, {
+      method: "POST",
+      url: "/api/notes",
+      headers,
+      payload: { title: "Only Body Source", markdown: "one body", label: "main" }
+    });
+    expect(sourceCreated.statusCode).toBe(201);
+    const sourceId = sourceCreated.body.note.id as string;
+    const sourceBodyId = sourceCreated.body.note.bodies[0]?.id as string | undefined;
+    expect(sourceBodyId).toBeTruthy();
+
+    const targetCreated = await injectJson(app, {
+      method: "POST",
+      url: "/api/notes",
+      headers,
+      payload: { title: "Move Target", markdown: "target body", label: "main" }
+    });
+    expect(targetCreated.statusCode).toBe(201);
+    const targetId = targetCreated.body.note.id as string;
+
+    const moved = await injectJson(app, {
+      method: "POST",
+      url: `/api/notes/${encodeURIComponent(sourceId)}/bodies/${encodeURIComponent(sourceBodyId ?? "")}/move`,
+      headers,
+      payload: { targetNoteRef: targetId }
+    });
+    expect(moved.statusCode).toBe(200);
+    expect(moved.body.sourceDeleted).toBe(true);
+    expect(moved.body.source).toBeNull();
+    expect(moved.body.sourceNoteId).toBe(sourceId);
+    expect(moved.body.target.note.id).toBe(targetId);
+
+    const sourceMissing = await injectJson(app, {
+      method: "GET",
+      url: `/api/notes/${encodeURIComponent(sourceId)}`,
+      headers
+    });
+    expect(sourceMissing.statusCode).toBe(404);
   });
 
   it("isolates notes per user id", async () => {

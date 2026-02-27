@@ -408,8 +408,11 @@ export class MimexCore {
       updatedAt: now
     };
     targetNote.bodies.push(movedBodyMeta);
-    sourceNote.updatedAt = now;
     targetNote.updatedAt = now;
+    const sourceDeleted = sourceNote.bodies.length === 0;
+    if (!sourceDeleted) {
+      sourceNote.updatedAt = now;
+    }
 
     const sourceBodyPath = path.join(this.bodiesDir(sourceNote.id), `${sourceBody.id}.md`);
     const targetBodyPath = path.join(this.bodiesDir(targetNote.id), `${movedBodyId}.md`);
@@ -417,15 +420,27 @@ export class MimexCore {
     await writeFile(targetBodyPath, markdown, "utf8");
     await rm(sourceBodyPath, { force: true });
 
-    await this.writeNoteMeta(sourceNote);
+    if (sourceDeleted) {
+      await this.removeNoteDirectoryAndSoftLinkReferences(sourceNote.id);
+    } else {
+      await this.writeNoteMeta(sourceNote);
+    }
     await this.writeNoteMeta(targetNote);
     await this.autoCommitWorkspace(`note: move body ${sourceNote.title} [${sourceBody.id}] -> ${targetNote.title}`);
-    this.cacheNoteMeta(sourceNote);
+    if (sourceDeleted) {
+      this.removeCachedNote(sourceNote.id);
+    } else {
+      this.cacheNoteMeta(sourceNote);
+    }
     this.cacheNoteMeta(targetNote);
     void this.persistNotesCache();
 
-    const [source, target] = await Promise.all([this.getNote(sourceNote.id), this.getNote(targetNote.id)]);
+    const target = await this.getNote(targetNote.id);
+    const source = sourceDeleted ? null : await this.getNote(sourceNote.id);
     return {
+      sourceDeleted,
+      sourceNoteId: sourceNote.id,
+      sourceNoteTitle: sourceNote.title,
       source,
       target,
       movedBodyId
@@ -510,41 +525,10 @@ export class MimexCore {
       throw new Error(`note not found: ${noteRef}`);
     }
 
-    await rm(this.noteDir(note.id), { recursive: true, force: true });
-
-    const store = await this.readSoftLinkStore();
-    let changed = false;
-
-    if (store.edges[note.id]) {
-      delete store.edges[note.id];
-      changed = true;
-    }
-
-    for (const [src, targets] of Object.entries(store.edges)) {
-      if (targets[note.id] !== undefined) {
-        delete targets[note.id];
-        changed = true;
-      }
-      if (Object.keys(targets).length === 0) {
-        delete store.edges[src];
-        changed = true;
-      }
-    }
-
-    const filteredEvents = store.events.filter((event) => event.src !== note.id && event.dst !== note.id);
-    if (filteredEvents.length !== store.events.length) {
-      store.events = filteredEvents;
-      changed = true;
-    }
-
-    if (changed) {
-      await writeFile(this.softLinksPath(), JSON.stringify(store, null, 2), "utf8");
-    }
+    await this.removeNoteDirectoryAndSoftLinkReferences(note.id);
 
     await this.autoCommitWorkspace(`note: delete ${note.title}`);
     this.removeCachedNote(note.id);
-    this.softLinkStoreCache = store;
-    this.topSoftLinksCache.clear();
     void this.persistNotesCache();
     return note;
   }
@@ -734,6 +718,42 @@ export class MimexCore {
       this.softLinkStoreCache = empty;
       return empty;
     }
+  }
+
+  private async removeNoteDirectoryAndSoftLinkReferences(noteId: string): Promise<void> {
+    await rm(this.noteDir(noteId), { recursive: true, force: true });
+
+    const store = await this.readSoftLinkStore();
+    let changed = false;
+
+    if (store.edges[noteId]) {
+      delete store.edges[noteId];
+      changed = true;
+    }
+
+    for (const [src, targets] of Object.entries(store.edges)) {
+      if (targets[noteId] !== undefined) {
+        delete targets[noteId];
+        changed = true;
+      }
+      if (Object.keys(targets).length === 0) {
+        delete store.edges[src];
+        changed = true;
+      }
+    }
+
+    const filteredEvents = store.events.filter((event) => event.src !== noteId && event.dst !== noteId);
+    if (filteredEvents.length !== store.events.length) {
+      store.events = filteredEvents;
+      changed = true;
+    }
+
+    if (changed) {
+      await writeFile(this.softLinksPath(), JSON.stringify(store, null, 2), "utf8");
+    }
+
+    this.softLinkStoreCache = store;
+    this.topSoftLinksCache.clear();
   }
 
   private async readBodies(noteId: string, bodyMetas: NoteBodyMeta[]): Promise<NoteBody[]> {

@@ -102,7 +102,10 @@ export interface MoveBodyInput {
 }
 
 export interface MoveBodyResult {
-  source: NoteWithBodies;
+  source: NoteWithBodies | null;
+  sourceDeleted: boolean;
+  sourceNoteId: string;
+  sourceNoteTitle: string;
   target: NoteWithBodies;
   movedBodyId: string;
 }
