@@ -54,6 +54,11 @@ function asErrorMessage(value) {
   return String(value);
 }
 
+function isAbortNavigationError(value) {
+  const message = asErrorMessage(value);
+  return message.includes("(-3)") || message.includes("ERR_ABORTED");
+}
+
 function log(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
   process.stdout.write(line);
@@ -347,21 +352,44 @@ function createMainWindow() {
     }
   });
 
-  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     if (shuttingDown) {
       return;
     }
-    log(`did-fail-load: ${errorCode} ${errorDescription}`);
+    if (errorCode === -3) {
+      return;
+    }
+    log(`did-fail-load: ${errorCode} ${errorDescription} ${validatedURL ?? ""}`.trim());
   });
 
-  void window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingPageHtml())}`);
+  void window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingPageHtml())}`).catch((error) => {
+    if (!isAbortNavigationError(error)) {
+      log(`loading screen failed: ${asErrorMessage(error)}`);
+    }
+  });
   window.show();
   window.focus();
   return window;
 }
 
 async function loadMainUi(window) {
-  await window.loadURL(`http://127.0.0.1:${webPort}`);
+  const targetUrl = `http://127.0.0.1:${webPort}`;
+  try {
+    await window.loadURL(targetUrl);
+    return;
+  } catch (error) {
+    if (!isAbortNavigationError(error)) {
+      throw error;
+    }
+  }
+
+  // Data URL loading screen can be aborted by the real UI navigation.
+  if (window.webContents.getURL().startsWith(targetUrl)) {
+    return;
+  }
+
+  await wait(150);
+  await window.loadURL(targetUrl);
 }
 
 async function showStartupError(message) {
