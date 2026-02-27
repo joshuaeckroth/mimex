@@ -215,6 +215,34 @@ describe("MimexCore", () => {
     await expect(access(bodyFilePath)).rejects.toThrow();
   });
 
+  it("moves a body from one note to another", async () => {
+    const { core, dir } = await newWorkspaceCore();
+    const source = await core.createNote({ title: "Move Source", markdown: "source main", label: "main" });
+    const sourceWithExtra = await core.addBody({ noteRef: source.note.id, markdown: "move me", label: "extra" });
+    const bodyToMove = sourceWithExtra.note.bodies.find((body) => body.label === "extra");
+    expect(bodyToMove?.id).toBeTruthy();
+
+    const target = await core.createNote({ title: "Move Target", markdown: "target main", label: "main" });
+    const moved = await core.moveBody({
+      noteRef: source.note.id,
+      bodyId: bodyToMove?.id ?? "",
+      targetNoteRef: target.note.id
+    });
+
+    expect(moved.source.note.id).toBe(source.note.id);
+    expect(moved.target.note.id).toBe(target.note.id);
+    expect(moved.source.note.bodies.find((body) => body.id === bodyToMove?.id)).toBeUndefined();
+
+    const movedBody = moved.target.bodies.find((body) => body.id === moved.movedBodyId);
+    expect(movedBody?.label).toBe("extra");
+    expect(movedBody?.markdown).toBe("move me");
+
+    const sourceBodyFile = path.join(dir, "notes", source.note.id, "bodies", `${bodyToMove?.id}.md`);
+    const targetBodyFile = path.join(dir, "notes", target.note.id, "bodies", `${moved.movedBodyId}.md`);
+    await expect(access(sourceBodyFile)).rejects.toThrow();
+    await access(targetBodyFile);
+  });
+
   it("creates real git commits when autoCommit is enabled", async () => {
     const { core, dir } = await newWorkspaceCore({ autoCommit: true });
     runGit(dir, ["config", "user.name", "Mimex Test"]);

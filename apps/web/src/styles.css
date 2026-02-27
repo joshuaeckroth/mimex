@@ -247,6 +247,20 @@ body.dialog-open {
   letter-spacing: 0.06em;
 }
 
+.settings-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.settings-inline input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+}
+
 .prompt-actions {
   display: inline-flex;
   justify-content: flex-end;

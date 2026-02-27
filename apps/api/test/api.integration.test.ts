@@ -86,13 +86,45 @@ describe("mimex api integration", () => {
     expect(renamedBody.statusCode).toBe(200);
     expect(renamedBody.body.note.bodies.map((body: { label: string }) => body.label)).toContain("secondary");
 
+    const targetCreated = await injectJson(app, {
+      method: "POST",
+      url: "/api/notes",
+      headers,
+      payload: { title: "Beta", markdown: "beta body", label: "main" }
+    });
+    expect(targetCreated.statusCode).toBe(201);
+    const targetNoteId = targetCreated.body.note.id as string;
+    expect(targetNoteId).toBeTruthy();
+
+    const movedBody = await injectJson(app, {
+      method: "POST",
+      url: `/api/notes/${encodeURIComponent(noteId)}/bodies/${encodeURIComponent(extraBodyId ?? "")}/move`,
+      headers,
+      payload: { targetNoteRef: targetNoteId }
+    });
+    expect(movedBody.statusCode).toBe(200);
+    expect(movedBody.body.source.note.id).toBe(noteId);
+    expect(movedBody.body.target.note.id).toBe(targetNoteId);
+    expect(movedBody.body.source.note.bodies).toHaveLength(1);
+    expect(movedBody.body.target.bodies.map((body: { label: string }) => body.label)).toContain("secondary");
+    const movedBodyId = movedBody.body.movedBodyId as string;
+    expect(movedBodyId).toBeTruthy();
+
     const deletedBody = await injectJson(app, {
       method: "DELETE",
-      url: `/api/notes/${encodeURIComponent(noteId)}/bodies/${encodeURIComponent(extraBodyId ?? "")}`,
+      url: `/api/notes/${encodeURIComponent(targetNoteId)}/bodies/${encodeURIComponent(movedBodyId)}`,
       headers
     });
     expect(deletedBody.statusCode).toBe(200);
     expect(deletedBody.body.note.bodies).toHaveLength(1);
+
+    const deletedTargetNote = await injectJson(app, {
+      method: "DELETE",
+      url: `/api/notes/${encodeURIComponent(targetNoteId)}`,
+      headers
+    });
+    expect(deletedTargetNote.statusCode).toBe(200);
+    expect(deletedTargetNote.body.id).toBe(targetNoteId);
 
     const renamedNote = await injectJson(app, {
       method: "PUT",
@@ -163,8 +195,11 @@ describe("mimex api integration", () => {
     const commitSubjects = runGit(userWorkspace, ["log", "--pretty=%s"]).split("\n").filter(Boolean);
     expect(commitSubjects.length).toBeGreaterThanOrEqual(8);
     expect(commitSubjects).toContain("note: create Alpha");
+    expect(commitSubjects).toContain("note: create Beta");
     expect(commitSubjects.some((subject) => subject.startsWith("note: rename body Alpha"))).toBe(true);
-    expect(commitSubjects.some((subject) => subject.startsWith("note: delete body Alpha"))).toBe(true);
+    expect(commitSubjects.some((subject) => subject.startsWith("note: move body Alpha"))).toBe(true);
+    expect(commitSubjects.some((subject) => subject.startsWith("note: delete body"))).toBe(true);
+    expect(commitSubjects).toContain("note: delete Beta");
     expect(commitSubjects).toContain("note: rename alpha -> Alpha Prime");
     expect(commitSubjects).toContain("note: archive Alpha Prime");
     expect(commitSubjects).toContain("note: restore Alpha Prime");

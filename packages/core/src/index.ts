@@ -17,6 +17,8 @@ import type {
   SoftLinkEvent,
   SoftLinkTarget,
   DeleteBodyInput,
+  MoveBodyInput,
+  MoveBodyResult,
   RenameBodyInput,
   UpdateBodyInput
 } from "@mimex/shared-types";
@@ -361,6 +363,73 @@ export class MimexCore {
     void this.persistNotesCache();
 
     return this.getNote(note.id);
+  }
+
+  async moveBody(input: MoveBodyInput): Promise<MoveBodyResult> {
+    await this.init();
+    const sourceNote = await this.resolveNoteRef(input.noteRef, { includeArchived: true });
+    if (!sourceNote) {
+      throw new Error(`note not found: ${input.noteRef}`);
+    }
+    if (isArchived(sourceNote)) {
+      throw new Error(`note is archived: ${sourceNote.title}`);
+    }
+
+    const targetNote = await this.resolveNoteRef(input.targetNoteRef, { includeArchived: true });
+    if (!targetNote) {
+      throw new Error(`note not found: ${input.targetNoteRef}`);
+    }
+    if (isArchived(targetNote)) {
+      throw new Error(`note is archived: ${targetNote.title}`);
+    }
+    if (sourceNote.id === targetNote.id) {
+      throw new Error("source and target notes must be different");
+    }
+
+    const bodyIndex = sourceNote.bodies.findIndex((entry) => entry.id === input.bodyId);
+    if (bodyIndex < 0) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
+
+    const [sourceBody] = sourceNote.bodies.splice(bodyIndex, 1);
+    if (!sourceBody) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
+
+    const now = new Date().toISOString();
+    let movedBodyId = sourceBody.id;
+    if (targetNote.bodies.some((entry) => entry.id === movedBodyId)) {
+      movedBodyId = randomUUID();
+    }
+
+    const movedBodyMeta: NoteBodyMeta = {
+      ...sourceBody,
+      id: movedBodyId,
+      updatedAt: now
+    };
+    targetNote.bodies.push(movedBodyMeta);
+    sourceNote.updatedAt = now;
+    targetNote.updatedAt = now;
+
+    const sourceBodyPath = path.join(this.bodiesDir(sourceNote.id), `${sourceBody.id}.md`);
+    const targetBodyPath = path.join(this.bodiesDir(targetNote.id), `${movedBodyId}.md`);
+    const markdown = await readFile(sourceBodyPath, "utf8");
+    await writeFile(targetBodyPath, markdown, "utf8");
+    await rm(sourceBodyPath, { force: true });
+
+    await this.writeNoteMeta(sourceNote);
+    await this.writeNoteMeta(targetNote);
+    await this.autoCommitWorkspace(`note: move body ${sourceNote.title} [${sourceBody.id}] -> ${targetNote.title}`);
+    this.cacheNoteMeta(sourceNote);
+    this.cacheNoteMeta(targetNote);
+    void this.persistNotesCache();
+
+    const [source, target] = await Promise.all([this.getNote(sourceNote.id), this.getNote(targetNote.id)]);
+    return {
+      source,
+      target,
+      movedBodyId
+    };
   }
 
   async renameNote(noteRef: string, title: string): Promise<NoteWithBodies> {

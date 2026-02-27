@@ -94,3 +94,15 @@ export interface DeleteBodyInput {
   noteRef: string;
   bodyId: string;
 }
+
+export interface MoveBodyInput {
+  noteRef: string;
+  bodyId: string;
+  targetNoteRef: string;
+}
+
+export interface MoveBodyResult {
+  source: NoteWithBodies;
+  target: NoteWithBodies;
+  movedBodyId: string;
+}

@@ -50,6 +50,10 @@ const renameBodySchema = z.object({
   label: z.string().min(1)
 });
 
+const moveBodySchema = z.object({
+  targetNoteRef: z.string().trim().min(1)
+});
+
 const renameNoteSchema = z.object({
   title: z.string().min(1)
 });
@@ -192,6 +196,31 @@ export function buildMimexApi(options: MimexApiOptions = {}): FastifyInstance {
     try {
       const note = await core.deleteBody({ noteRef: params.noteRef, bodyId: params.bodyId });
       return reply.code(200).send(note);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message.startsWith("note not found") || message.startsWith("body not found")) {
+        return reply.code(404).send({ error: message });
+      }
+      return reply.code(400).send({ error: message });
+    }
+  });
+
+  app.post("/api/notes/:noteRef/bodies/:bodyId/move", async (request, reply) => {
+    const core = await getCore(request.headers["x-user-id"] as string | undefined);
+    const params = z.object({ noteRef: z.string().min(1), bodyId: z.string().min(1) }).parse(request.params);
+    const parsed = moveBodySchema.safeParse(request.body);
+
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    try {
+      const moved = await core.moveBody({
+        noteRef: params.noteRef,
+        bodyId: params.bodyId,
+        targetNoteRef: parsed.data.targetNoteRef
+      });
+      return reply.code(200).send(moved);
     } catch (error) {
       const message = (error as Error).message;
       if (message.startsWith("note not found") || message.startsWith("body not found")) {

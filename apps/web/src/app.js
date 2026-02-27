@@ -27,6 +27,11 @@ const els = {
 
 const KEY_THEME = "mimex:web:theme";
 const KEY_WIDE = "mimex:web:wide";
+const KEY_GIT_AUTO_SYNC_PREFIX = "mimex:web:auto-sync";
+const AUTO_SYNC_DEFAULT_INTERVAL_MINUTES = 5;
+const AUTO_SYNC_MIN_INTERVAL_MINUTES = 1;
+const AUTO_SYNC_MAX_INTERVAL_MINUTES = 60;
+const AUTO_SYNC_RETRY_DELAY_MS = 30_000;
 const MOBILE_MEDIA = window.matchMedia("(max-width: 900px)");
 const WIDE_DEFAULT_MEDIA = window.matchMedia("(min-width: 1100px)");
 
@@ -52,7 +57,12 @@ const state = {
     authMode: "ssh",
     tokenRef: null,
     hasAuth: true,
-    configured: false
+    configured: false,
+    autoSyncEnabled: false,
+    autoSyncIntervalMs: AUTO_SYNC_DEFAULT_INTERVAL_MINUTES * 60_000,
+    autoSyncLastSuccessAt: null,
+    autoSyncLastError: null,
+    autoSyncLastErrorAt: null
   }
 };
 
@@ -62,6 +72,8 @@ const desktopBridge =
     : null;
 
 let dialogOpen = false;
+let gitActionInFlight = false;
+let autoSyncTimerId = null;
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
@@ -217,6 +229,114 @@ function writePersisted(key, value) {
   } catch {
     // ignore storage failures
   }
+}
+
+function clampAutoSyncIntervalMinutes(value) {
+  if (!Number.isFinite(value)) {
+    return AUTO_SYNC_DEFAULT_INTERVAL_MINUTES;
+  }
+  return Math.min(AUTO_SYNC_MAX_INTERVAL_MINUTES, Math.max(AUTO_SYNC_MIN_INTERVAL_MINUTES, Math.round(value)));
+}
+
+function autoSyncStorageKey(userId = getUserId()) {
+  const normalized = (userId || "local").trim() || "local";
+  return `${KEY_GIT_AUTO_SYNC_PREFIX}:${normalized}`;
+}
+
+function loadAutoSyncPrefsForCurrentUser() {
+  const raw = readPersisted(autoSyncStorageKey());
+  const defaults = {
+    autoSyncEnabled: false,
+    autoSyncIntervalMs: AUTO_SYNC_DEFAULT_INTERVAL_MINUTES * 60_000,
+    autoSyncLastSuccessAt: null,
+    autoSyncLastError: null,
+    autoSyncLastErrorAt: null
+  };
+
+  if (!raw) {
+    state.git = {
+      ...state.git,
+      ...defaults
+    };
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const enabled = Boolean(parsed?.enabled);
+    const intervalMinutes = clampAutoSyncIntervalMinutes(Number(parsed?.intervalMinutes));
+    state.git = {
+      ...state.git,
+      autoSyncEnabled: enabled,
+      autoSyncIntervalMs: intervalMinutes * 60_000,
+      autoSyncLastSuccessAt: null,
+      autoSyncLastError: null,
+      autoSyncLastErrorAt: null
+    };
+  } catch {
+    state.git = {
+      ...state.git,
+      ...defaults
+    };
+  }
+}
+
+function saveAutoSyncPrefsForCurrentUser() {
+  const intervalMinutes = clampAutoSyncIntervalMinutes(state.git.autoSyncIntervalMs / 60_000);
+  writePersisted(
+    autoSyncStorageKey(),
+    JSON.stringify({
+      enabled: Boolean(state.git.autoSyncEnabled),
+      intervalMinutes
+    })
+  );
+}
+
+function clearAutoSyncTimer() {
+  if (autoSyncTimerId !== null) {
+    window.clearTimeout(autoSyncTimerId);
+    autoSyncTimerId = null;
+  }
+}
+
+function scheduleAutoSync(delayMs) {
+  clearAutoSyncTimer();
+  if (!state.git.autoSyncEnabled) {
+    return;
+  }
+
+  const waitMs = Math.max(5_000, Math.floor(delayMs));
+  autoSyncTimerId = window.setTimeout(() => {
+    autoSyncTimerId = null;
+    void runAutoSyncCycle();
+  }, waitMs);
+}
+
+function restartAutoSyncScheduler() {
+  if (!state.git.autoSyncEnabled) {
+    clearAutoSyncTimer();
+    return;
+  }
+  scheduleAutoSync(state.git.autoSyncIntervalMs);
+}
+
+function formatAutoSyncStatus() {
+  if (!state.git.autoSyncEnabled) {
+    return "Automatic sync is off.";
+  }
+
+  const parts = [`Automatic sync runs every ${Math.round(state.git.autoSyncIntervalMs / 60_000)} minute(s).`];
+  if (state.git.autoSyncLastSuccessAt) {
+    parts.push(`Last success: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
+  } else {
+    parts.push("Last success: never.");
+  }
+
+  if (state.git.autoSyncLastError && state.git.autoSyncLastErrorAt) {
+    parts.push(`Last error (${formatDate(state.git.autoSyncLastErrorAt)}): ${state.git.autoSyncLastError}`);
+  }
+
+  return parts.join(" ");
 }
 
 function isMobileViewport() {
@@ -375,7 +495,10 @@ function resolveTokenRef(userId) {
 
 async function loadGitSettings() {
   const payload = await apiFetch("/api/git/settings");
-  state.git = normalizeGitSettings(payload);
+  state.git = {
+    ...state.git,
+    ...normalizeGitSettings(payload)
+  };
 }
 
 async function maybeSetDesktopToken(tokenRef, token) {
@@ -415,22 +538,98 @@ async function apiGitFetch(path, options = {}) {
   });
 }
 
-async function runGitAction(action) {
-  const payload = await apiGitFetch(`/api/git/${action}`, { method: "POST" });
-  if (payload?.status) {
-    state.git = {
-      ...state.git,
-      ...normalizeGitSettings({
-        remoteUrl: payload.status.remoteUrl ?? state.git.remoteUrl,
-        branch: payload.status.remoteBranch ?? state.git.branch,
-        authMode: payload.status.authMode ?? state.git.authMode,
-        tokenRef: payload.status.tokenRef ?? state.git.tokenRef,
-        hasAuth: payload.status.hasAuth,
-        configured: payload.status.configured
-      })
-    };
+async function runGitAction(action, options = {}) {
+  const quietSuccess = options.quietSuccess === true;
+  const skipIfBusy = options.skipIfBusy === true;
+
+  if (gitActionInFlight) {
+    if (skipIfBusy) {
+      return { skipped: true };
+    }
+    throw new Error("Another git operation is in progress.");
   }
-  setStatus(`Git ${action} succeeded`);
+
+  gitActionInFlight = true;
+  try {
+    const payload = await apiGitFetch(`/api/git/${action}`, { method: "POST" });
+    if (payload?.status) {
+      state.git = {
+        ...state.git,
+        ...normalizeGitSettings({
+          remoteUrl: payload.status.remoteUrl ?? state.git.remoteUrl,
+          branch: payload.status.remoteBranch ?? state.git.branch,
+          authMode: payload.status.authMode ?? state.git.authMode,
+          tokenRef: payload.status.tokenRef ?? state.git.tokenRef,
+          hasAuth: payload.status.hasAuth,
+          configured: payload.status.configured
+        })
+      };
+    }
+
+    if (!quietSuccess) {
+      setStatus(`Git ${action} succeeded`);
+    }
+
+    return payload;
+  } finally {
+    gitActionInFlight = false;
+  }
+}
+
+async function runAutoSyncCycle() {
+  if (!state.git.autoSyncEnabled) {
+    return;
+  }
+
+  if (!state.git.configured) {
+    state.git.autoSyncLastError = "Git remote is not configured.";
+    state.git.autoSyncLastErrorAt = new Date().toISOString();
+    scheduleAutoSync(state.git.autoSyncIntervalMs);
+    return;
+  }
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    state.git.autoSyncLastError = "Device appears to be offline.";
+    state.git.autoSyncLastErrorAt = new Date().toISOString();
+    scheduleAutoSync(state.git.autoSyncIntervalMs);
+    return;
+  }
+
+  try {
+    const result = await runGitAction("sync", {
+      quietSuccess: true,
+      skipIfBusy: true
+    });
+    if (result?.skipped) {
+      scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
+      return;
+    }
+
+    state.git.autoSyncLastSuccessAt = new Date().toISOString();
+    state.git.autoSyncLastError = null;
+    state.git.autoSyncLastErrorAt = null;
+    scheduleAutoSync(state.git.autoSyncIntervalMs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    state.git.autoSyncLastError = message;
+    state.git.autoSyncLastErrorAt = new Date().toISOString();
+    setStatus(`Auto sync failed: ${message}`, true);
+    scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
+  }
+}
+
+async function refreshGitContextForCurrentUser() {
+  clearAutoSyncTimer();
+  loadAutoSyncPrefsForCurrentUser();
+  let loaded = false;
+  try {
+    await loadGitSettings();
+    loaded = true;
+  } finally {
+    if (loaded) {
+      restartAutoSyncScheduler();
+    }
+  }
 }
 
 async function openSettingsMenu() {
@@ -525,14 +724,70 @@ async function openSettingsMenu() {
     ? "Electron app stores HTTPS tokens in system keychain."
     : "Browser/web mode stores token in workspace config file.";
 
+  const autoSyncTitle = document.createElement("p");
+  autoSyncTitle.className = "prompt-message";
+  autoSyncTitle.textContent = "Automatic sync";
+
+  const autoSyncEnabledLabel = document.createElement("label");
+  autoSyncEnabledLabel.className = "settings-field settings-inline";
+  autoSyncEnabledLabel.textContent = "Enable periodic sync";
+  const autoSyncEnabledInput = document.createElement("input");
+  autoSyncEnabledInput.type = "checkbox";
+  autoSyncEnabledInput.checked = state.git.autoSyncEnabled;
+  autoSyncEnabledLabel.append(autoSyncEnabledInput);
+
+  const autoSyncIntervalLabel = document.createElement("label");
+  autoSyncIntervalLabel.className = "settings-field";
+  autoSyncIntervalLabel.textContent = "Sync interval (minutes)";
+  const autoSyncIntervalInput = document.createElement("input");
+  autoSyncIntervalInput.className = "prompt-input";
+  autoSyncIntervalInput.type = "number";
+  autoSyncIntervalInput.min = String(AUTO_SYNC_MIN_INTERVAL_MINUTES);
+  autoSyncIntervalInput.max = String(AUTO_SYNC_MAX_INTERVAL_MINUTES);
+  autoSyncIntervalInput.step = "1";
+  autoSyncIntervalInput.value = String(clampAutoSyncIntervalMinutes(state.git.autoSyncIntervalMs / 60_000));
+  autoSyncIntervalLabel.append(autoSyncIntervalInput);
+
+  const autoSyncHint = document.createElement("p");
+  autoSyncHint.className = "prompt-message";
+  autoSyncHint.textContent = "Runs pull --rebase + push in the background. Conflicts may still require manual resolution.";
+
+  const autoSyncStatus = document.createElement("p");
+  autoSyncStatus.className = "prompt-message";
+  autoSyncStatus.textContent = formatAutoSyncStatus();
+
   function syncAuthVisibility() {
     const showPat = authSelect.value === "https_pat";
     tokenRefLabel.hidden = !showPat;
     tokenLabel.hidden = !showPat;
     authHint.hidden = !showPat;
   }
+
+  function syncAutoSyncControls() {
+    autoSyncIntervalInput.disabled = !autoSyncEnabledInput.checked;
+    const previewInterval = clampAutoSyncIntervalMinutes(Number(autoSyncIntervalInput.value));
+    if (!autoSyncEnabledInput.checked) {
+      autoSyncStatus.textContent = "Automatic sync is off.";
+      return;
+    }
+
+    const parts = [`Automatic sync will run every ${previewInterval} minute(s) after save.`];
+    if (state.git.autoSyncLastSuccessAt) {
+      parts.push(`Last success: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
+    } else {
+      parts.push("Last success: never.");
+    }
+    if (state.git.autoSyncLastError && state.git.autoSyncLastErrorAt) {
+      parts.push(`Last error (${formatDate(state.git.autoSyncLastErrorAt)}): ${state.git.autoSyncLastError}`);
+    }
+    autoSyncStatus.textContent = parts.join(" ");
+  }
+
   authSelect.addEventListener("change", syncAuthVisibility);
+  autoSyncEnabledInput.addEventListener("change", syncAutoSyncControls);
+  autoSyncIntervalInput.addEventListener("input", syncAutoSyncControls);
   syncAuthVisibility();
+  syncAutoSyncControls();
 
   const actionsTop = document.createElement("div");
   actionsTop.className = "prompt-actions";
@@ -587,6 +842,18 @@ async function openSettingsMenu() {
       const branch = branchInput.value.trim() || "main";
       const tokenRef = tokenRefInput.value.trim() || resolveTokenRef(getUserId());
       const token = tokenInput.value.trim();
+      const intervalMinutesRaw = Number(autoSyncIntervalInput.value);
+      const intervalMinutes = clampAutoSyncIntervalMinutes(intervalMinutesRaw);
+
+      if (
+        !Number.isFinite(intervalMinutesRaw) ||
+        intervalMinutesRaw < AUTO_SYNC_MIN_INTERVAL_MINUTES ||
+        intervalMinutesRaw > AUTO_SYNC_MAX_INTERVAL_MINUTES
+      ) {
+        throw new Error(
+          `Auto sync interval must be a number from ${AUTO_SYNC_MIN_INTERVAL_MINUTES} to ${AUTO_SYNC_MAX_INTERVAL_MINUTES}.`
+        );
+      }
 
       if (authMode === "https_pat" && desktopBridge) {
         if (token) {
@@ -611,11 +878,19 @@ async function openSettingsMenu() {
         await maybeDeleteDesktopToken(state.git.tokenRef);
       }
 
-      state.git = normalizeGitSettings(payload);
+      state.git = {
+        ...state.git,
+        ...normalizeGitSettings(payload),
+        autoSyncEnabled: autoSyncEnabledInput.checked,
+        autoSyncIntervalMs: intervalMinutes * 60_000
+      };
+      saveAutoSyncPrefsForCurrentUser();
+      restartAutoSyncScheduler();
       setStatus("Saved git settings");
       tokenInput.value = "";
       tokenInput.placeholder = state.git.hasAuth ? "Saved. Enter to replace." : "Enter token";
       syncAuthVisibility();
+      syncAutoSyncControls();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`Failed to save settings: ${message}`, true);
@@ -656,7 +931,23 @@ async function openSettingsMenu() {
     }
   });
 
-  dialog.append(titleEl, sectionTitle, remoteLabel, branchLabel, authLabel, tokenRefLabel, tokenLabel, authHint, actionsGit, actionsTop);
+  dialog.append(
+    titleEl,
+    sectionTitle,
+    remoteLabel,
+    branchLabel,
+    authLabel,
+    tokenRefLabel,
+    tokenLabel,
+    authHint,
+    autoSyncTitle,
+    autoSyncEnabledLabel,
+    autoSyncIntervalLabel,
+    autoSyncHint,
+    autoSyncStatus,
+    actionsGit,
+    actionsTop
+  );
   overlay.append(dialog);
   document.body.append(overlay);
   document.addEventListener("keydown", onKeydown, true);
@@ -1080,6 +1371,31 @@ async function deleteBody(noteId, bodyId) {
   return updated;
 }
 
+async function moveBodyToNote(noteId, bodyId, targetNoteRef) {
+  const moved = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/bodies/${encodeURIComponent(bodyId)}/move`, {
+    method: "POST",
+    body: JSON.stringify({ targetNoteRef })
+  });
+
+  updateCachedNoteMeta(moved.source.note);
+  updateCachedNoteMeta(moved.target.note);
+
+  if (state.selectedNoteId === moved.source.note.id) {
+    state.selectedNote = moved.source;
+    const sourceBodyCount = moved.source.bodies?.length ?? 0;
+    state.activeBodyIndex = sourceBodyCount === 0 ? 0 : Math.min(state.activeBodyIndex, sourceBodyCount - 1);
+  } else if (state.selectedNoteId === moved.target.note.id) {
+    state.selectedNote = moved.target;
+    const movedIndex = moved.target.bodies.findIndex((entry) => entry.id === moved.movedBodyId);
+    if (movedIndex >= 0) {
+      state.activeBodyIndex = movedIndex;
+    }
+  }
+
+  renderNoteList();
+  return moved;
+}
+
 async function renameNote(noteId, title) {
   const updated = await apiFetch(`/api/notes/${encodeURIComponent(noteId)}/title`, {
     method: "PUT",
@@ -1249,6 +1565,46 @@ function renderNoteDetail() {
         })();
       });
 
+      const moveBodyBtn = document.createElement("button");
+      moveBodyBtn.type = "button";
+      moveBodyBtn.className = "body-label-btn";
+      moveBodyBtn.textContent = "move to note";
+      moveBodyBtn.disabled = isSaving;
+      moveBodyBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        void (async () => {
+          const target = await promptForInput("Move body to note (title or id):", {
+            placeholder: "target note title or id",
+            confirmLabel: "move"
+          });
+          if (target === null) {
+            return;
+          }
+          const targetNoteRef = target.trim();
+          if (!targetNoteRef) {
+            setStatus("Target note is required", true);
+            return;
+          }
+
+          state.savingBodyIds.add(bodyKey);
+          renderNoteDetail();
+          try {
+            const moved = await moveBodyToNote(note.note.id, body.id, targetNoteRef);
+            state.editingBodyIds.delete(bodyKey);
+            state.bodyDrafts.delete(bodyKey);
+            setStatus(`Moved body "${body.label}" to ${moved.target.note.title}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatus(`Failed to move body: ${message}`, true);
+          } finally {
+            state.savingBodyIds.delete(bodyKey);
+            renderNoteDetail();
+          }
+        })();
+      });
+
       const deleteBodyBtn = document.createElement("button");
       deleteBodyBtn.type = "button";
       deleteBodyBtn.className = "body-label-btn";
@@ -1283,7 +1639,7 @@ function renderNoteDetail() {
         })();
       });
 
-      labelActions.append(editBtn, renameLabelBtn, deleteBodyBtn);
+      labelActions.append(editBtn, renameLabelBtn, moveBodyBtn, deleteBodyBtn);
       label.append(labelActions);
     }
 
@@ -2095,6 +2451,10 @@ els.searchInput.addEventListener("input", () => {
 
 els.userId.addEventListener("change", () => {
   void refreshList({ preserveSelection: false });
+  void refreshGitContextForCurrentUser().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(`Failed to load git settings: ${message}`, true);
+  });
 });
 
 els.toggleThemeBtn.addEventListener("click", toggleTheme);
@@ -2118,7 +2478,7 @@ initUiPrefs();
 const initialPreferredNoteId = applyInitialHashState();
 writeHashState();
 void refreshList({ preserveSelection: false, preferredNoteId: initialPreferredNoteId });
-void loadGitSettings().catch((error) => {
+void refreshGitContextForCurrentUser().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   setStatus(`Failed to load git settings: ${message}`, true);
 });
