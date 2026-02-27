@@ -1,15 +1,19 @@
-import { access, appendFile, mkdir } from "node:fs/promises";
-import path from "node:path";
-import process from "node:process";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog } from "electron";
+const http = require("node:http");
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const path = require("node:path");
+const process = require("node:process");
+const { pathToFileURL } = require("node:url");
+const { app, BrowserWindow } = require("electron");
 
 const API_PORT = Number(process.env.MIMEX_DESKTOP_API_PORT ?? "8080");
 const WEB_PORT = Number(process.env.MIMEX_DESKTOP_WEB_PORT ?? "4173");
 const STARTUP_TIMEOUT_MS = 20_000;
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const runtimeRoot = app.isPackaged ? path.resolve(here, "..", "runtime") : await findRepoRoot(here);
+app.disableHardwareAcceleration();
+
+const here = __dirname;
+const runtimeRoot = app.isPackaged ? path.resolve(here, "..", "runtime") : findRepoRootSync(here);
 const apiEntry = path.join(runtimeRoot, "apps", "api", "dist", "server.js");
 const webEntry = path.join(runtimeRoot, "apps", "web", "scripts", "server.mjs");
 const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
@@ -21,6 +25,20 @@ let apiModule = null;
 let webServer = null;
 let logFilePath = null;
 
+const bootstrapLogPath = path.join(process.env.LOCALAPPDATA ?? process.cwd(), "Mimex", "bootstrap.log");
+bootstrapLog(`process start (pid=${process.pid})`);
+bootstrapLog(`runtimeRoot=${runtimeRoot}`);
+
+function bootstrapLog(message) {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  try {
+    fs.mkdirSync(path.dirname(bootstrapLogPath), { recursive: true });
+    fs.appendFileSync(bootstrapLogPath, line, "utf8");
+  } catch {
+    // ignore bootstrap logging failures
+  }
+}
+
 function asErrorMessage(value) {
   if (value instanceof Error) {
     return `${value.message}\n${value.stack ?? ""}`.trim();
@@ -31,8 +49,9 @@ function asErrorMessage(value) {
 function log(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
   process.stdout.write(line);
+  bootstrapLog(message);
   if (logFilePath) {
-    void appendFile(logFilePath, line, "utf8").catch(() => {
+    void fsp.appendFile(logFilePath, line, "utf8").catch(() => {
       // ignore logging failures
     });
   }
@@ -42,19 +61,36 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function checkHttp(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      const statusCode = res.statusCode ?? 500;
+      res.resume();
+      if (statusCode >= 200 && statusCode < 500) {
+        resolve();
+        return;
+      }
+      reject(new Error(`Unexpected status ${statusCode}`));
+    });
+
+    req.setTimeout(1_000, () => {
+      req.destroy(new Error("timed out"));
+    });
+
+    req.on("error", reject);
+  });
+}
+
 async function waitForHttp(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url);
-      if (response.status >= 200 && response.status < 500) {
-        return;
-      }
+      await checkHttp(url);
+      return;
     } catch {
       // retry
     }
-
     await wait(250);
   }
 
@@ -63,15 +99,15 @@ async function waitForHttp(url, timeoutMs) {
 
 async function assertRequiredFiles() {
   try {
-    await access(apiEntry);
+    await fsp.access(apiEntry);
   } catch {
-    throw new Error("API build output missing. Run: pnpm --filter @mimex/api build");
+    throw new Error(`API build output missing: ${apiEntry}`);
   }
 
   try {
-    await access(webIndex);
+    await fsp.access(webIndex);
   } catch {
-    throw new Error("Web build output missing. Run: pnpm --filter @mimex/web build");
+    throw new Error(`Web build output missing: ${webIndex}`);
   }
 }
 
@@ -183,45 +219,13 @@ function loadingPageHtml() {
 `;
 }
 
-function createMainWindow() {
-  const window = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 960,
-    minHeight: 640,
-    autoHideMenuBar: true,
-    show: true,
-    backgroundColor: "#f5f7fa",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  });
-
-  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
-    if (shuttingDown) {
-      return;
-    }
-    dialog.showErrorBox("Mimex Desktop", `Failed to load UI (${errorCode}): ${errorDescription}`);
-  });
-
-  void window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingPageHtml())}`);
-  window.show();
-  window.focus();
-  return window;
-}
-
-async function loadMainUi(window) {
-  await window.loadURL(`http://127.0.0.1:${WEB_PORT}`);
-}
-
-async function showStartupError(message) {
+function startupErrorHtml(message) {
   const safe = message
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-  const errorHtml = `
+
+  return `
 <!doctype html>
 <html lang="en">
   <head>
@@ -264,17 +268,54 @@ async function showStartupError(message) {
   <body>
     <div class="card">
       <h1>Mimex failed to start</h1>
-      <p>See log file at: <code>${logFilePath ?? "unknown"}</code></p>
+      <p>See logs at:</p>
+      <pre>${bootstrapLogPath}${logFilePath ? `\n${logFilePath}` : ""}</pre>
       <pre>${safe}</pre>
     </div>
   </body>
 </html>
 `;
+}
 
+function createMainWindow() {
+  const window = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 960,
+    minHeight: 640,
+    autoHideMenuBar: true,
+    show: true,
+    backgroundColor: "#f5f7fa",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+    if (shuttingDown) {
+      return;
+    }
+    log(`did-fail-load: ${errorCode} ${errorDescription}`);
+  });
+
+  void window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingPageHtml())}`);
+  window.show();
+  window.focus();
+  return window;
+}
+
+async function loadMainUi(window) {
+  await window.loadURL(`http://127.0.0.1:${WEB_PORT}`);
+}
+
+async function showStartupError(message) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
   }
-  await mainWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(errorHtml)}`);
+
+  await mainWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(startupErrorHtml(message))}`);
   mainWindow.show();
   mainWindow.focus();
 }
@@ -298,14 +339,6 @@ app.on("activate", () => {
   }
 });
 
-process.on("SIGINT", () => {
-  void stopServices().finally(() => process.exit(0));
-});
-
-process.on("SIGTERM", () => {
-  void stopServices().finally(() => process.exit(0));
-});
-
 process.on("uncaughtException", (error) => {
   const message = asErrorMessage(error);
   log(`uncaughtException: ${message}`);
@@ -318,40 +351,43 @@ process.on("unhandledRejection", (reason) => {
   void showStartupError(message);
 });
 
-try {
+async function boot() {
   await app.whenReady();
   const logsDir = path.join(app.getPath("userData"), "logs");
-  await mkdir(logsDir, { recursive: true });
+  await fsp.mkdir(logsDir, { recursive: true });
   logFilePath = path.join(logsDir, "main.log");
   log("app ready");
+  log(`appPath=${app.getAppPath()}`);
   log(`runtimeRoot=${runtimeRoot}`);
-  app.setAppUserModelId("dev.mimex.desktop");
+
   mainWindow = createMainWindow();
   log("main window created");
-  await startServices();
-  log("loading main UI");
-  await loadMainUi(mainWindow);
-  log("main UI loaded");
-} catch (error) {
-  const message = asErrorMessage(error);
-  log(`startup failure: ${message}`);
-  await showStartupError(message);
-  await stopServices();
+
+  try {
+    await startServices();
+    log("loading main UI");
+    await loadMainUi(mainWindow);
+    log("main UI loaded");
+  } catch (error) {
+    const message = asErrorMessage(error);
+    log(`startup failure: ${message}`);
+    await showStartupError(message);
+    await stopServices();
+  }
 }
 
-async function findRepoRoot(startDir) {
-  let current = startDir;
+void boot();
 
+function findRepoRootSync(startDir) {
+  let current = startDir;
   while (true) {
-    try {
-      await access(path.join(current, "pnpm-workspace.yaml"));
+    if (fs.existsSync(path.join(current, "pnpm-workspace.yaml"))) {
       return current;
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) {
-        throw new Error("Could not resolve repo root from desktop app location.");
-      }
-      current = parent;
     }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      throw new Error("Could not resolve repo root from desktop app location.");
+    }
+    current = parent;
   }
 }

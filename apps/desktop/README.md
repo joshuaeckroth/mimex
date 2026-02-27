@@ -49,3 +49,6 @@ Output:
 - This is a local desktop shell for the repo checkout.
 - `desktop:prepare` builds all runtime artifacts used by both dev and installer flows.
 - `dist:win` stages `apps/desktop/runtime` before packaging.
+- Startup logs:
+  - `%LOCALAPPDATA%\\Mimex\\bootstrap.log`
+  - `%APPDATA%\\Mimex\\logs\\main.log`

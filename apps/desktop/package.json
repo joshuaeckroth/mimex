@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Mimex desktop app",
   "author": "Mimex",
-  "main": "src/main.mjs",
+  "main": "src/main.cjs",
   "scripts": {
     "build": "node -e \"console.log('desktop main is source-only')\"",
     "build:runtime": "node ./scripts/prepare-runtime.mjs",
