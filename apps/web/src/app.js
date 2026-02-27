@@ -47,9 +47,146 @@ const state = {
   sidebarOpen: false
 };
 
+let dialogOpen = false;
+
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
   els.statusRow.classList.toggle("error", isError);
+}
+
+function openDialog({
+  title,
+  message = "",
+  defaultValue = "",
+  placeholder = "",
+  multiline = false,
+  showInput = false,
+  confirmLabel = "ok",
+  cancelLabel = "cancel"
+}) {
+  if (dialogOpen) {
+    return Promise.resolve({ confirmed: false, value: "" });
+  }
+
+  dialogOpen = true;
+  document.body.classList.add("dialog-open");
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  return new Promise((resolve) => {
+    let done = false;
+
+    const finish = (confirmed) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      dialogOpen = false;
+      document.body.classList.remove("dialog-open");
+      document.removeEventListener("keydown", onDocumentKeydown, true);
+      overlay.remove();
+      previousFocus?.focus();
+      resolve({
+        confirmed,
+        value: inputEl ? inputEl.value : ""
+      });
+    };
+
+    const onDocumentKeydown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+
+    const overlay = document.createElement("div");
+    overlay.className = "prompt-overlay";
+
+    const dialog = document.createElement("div");
+    dialog.className = "prompt-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", title);
+
+    const titleEl = document.createElement("h3");
+    titleEl.className = "prompt-title";
+    titleEl.textContent = title;
+    dialog.append(titleEl);
+
+    if (message) {
+      const messageEl = document.createElement("p");
+      messageEl.className = "prompt-message";
+      messageEl.textContent = message;
+      dialog.append(messageEl);
+    }
+
+    let inputEl = null;
+    if (showInput) {
+      inputEl = multiline ? document.createElement("textarea") : document.createElement("input");
+      inputEl.className = "prompt-input";
+      inputEl.value = defaultValue;
+      inputEl.placeholder = placeholder;
+
+      if (!multiline) {
+        inputEl.type = "text";
+      } else {
+        inputEl.rows = 8;
+      }
+
+      inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !multiline) {
+          event.preventDefault();
+          finish(true);
+        }
+      });
+      dialog.append(inputEl);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "prompt-actions";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = cancelLabel;
+    cancelBtn.addEventListener("click", () => finish(false));
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = "prompt-confirm";
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.addEventListener("click", () => finish(true));
+
+    actions.append(cancelBtn, confirmBtn);
+    dialog.append(actions);
+    overlay.append(dialog);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(false);
+      }
+    });
+
+    document.addEventListener("keydown", onDocumentKeydown, true);
+    document.body.append(overlay);
+
+    if (inputEl) {
+      inputEl.focus();
+      inputEl.select();
+    } else {
+      confirmBtn.focus();
+    }
+  });
+}
+
+async function promptForInput(title, options = {}) {
+  const result = await openDialog({ ...options, title, showInput: true });
+  if (!result.confirmed) {
+    return null;
+  }
+  return result.value;
+}
+
+async function confirmAction(title, options = {}) {
+  const result = await openDialog({ ...options, title, showInput: false });
+  return result.confirmed;
 }
 
 function readPersisted(key) {
@@ -757,23 +894,26 @@ function renderNoteDetail() {
         event.preventDefault();
         event.stopPropagation();
 
-        const next = window.prompt("New body label:", body.label);
-        if (next === null) {
-          return;
-        }
-        const trimmed = next.trim();
-        if (!trimmed) {
-          setStatus("Body label is required", true);
-          return;
-        }
-        if (trimmed === body.label) {
-          setStatus("Body label unchanged");
-          return;
-        }
-
-        state.savingBodyIds.add(bodyKey);
-        renderNoteDetail();
         void (async () => {
+          const next = await promptForInput("New body label:", {
+            defaultValue: body.label,
+            confirmLabel: "rename"
+          });
+          if (next === null) {
+            return;
+          }
+          const trimmed = next.trim();
+          if (!trimmed) {
+            setStatus("Body label is required", true);
+            return;
+          }
+          if (trimmed === body.label) {
+            setStatus("Body label unchanged");
+            return;
+          }
+
+          state.savingBodyIds.add(bodyKey);
+          renderNoteDetail();
           try {
             const updated = await renameBodyLabel(note.note.id, body.id, trimmed);
             setStatus(`Renamed body label on ${updated.note.title}`);
@@ -796,13 +936,16 @@ function renderNoteDetail() {
         event.preventDefault();
         event.stopPropagation();
 
-        if (!window.confirm(`Delete body "${body.label}" permanently?`)) {
-          return;
-        }
-
-        state.savingBodyIds.add(bodyKey);
-        renderNoteDetail();
         void (async () => {
+          const confirmed = await confirmAction(`Delete body "${body.label}" permanently?`, {
+            confirmLabel: "delete"
+          });
+          if (!confirmed) {
+            return;
+          }
+
+          state.savingBodyIds.add(bodyKey);
+          renderNoteDetail();
           try {
             const updated = await deleteBody(note.note.id, body.id);
             setStatus(`Deleted body from ${updated.note.title}`);
@@ -1231,7 +1374,7 @@ function cancelEditMode() {
 }
 
 async function createNoteFromPrompt() {
-  const title = window.prompt("New note title:");
+  const title = await promptForInput("New note title:", { confirmLabel: "create" });
   if (!title || !title.trim()) {
     return;
   }
@@ -1251,7 +1394,10 @@ async function addBodyFromPrompt() {
     setStatus("No note selected");
     return;
   }
-  const markdown = window.prompt("Body markdown:");
+  const markdown = await promptForInput("Body markdown:", {
+    multiline: true,
+    confirmLabel: "add"
+  });
   if (!markdown || !markdown.trim()) {
     return;
   }
@@ -1274,7 +1420,7 @@ async function followFromPrompt() {
     setStatus("No note selected");
     return;
   }
-  const target = window.prompt("Follow target:");
+  const target = await promptForInput("Follow target:", { confirmLabel: "follow" });
   if (!target || !target.trim()) {
     return;
   }
@@ -1294,7 +1440,10 @@ async function deleteActiveBody() {
     return;
   }
 
-  if (!window.confirm(`Delete body "${body.label}" permanently?`)) {
+  const confirmed = await confirmAction(`Delete body "${body.label}" permanently?`, {
+    confirmLabel: "delete"
+  });
+  if (!confirmed) {
     return;
   }
 
@@ -1343,7 +1492,10 @@ async function deleteSelectedNote() {
     setStatus("No note selected");
     return;
   }
-  if (!window.confirm(`Delete "${selectedTitle}" permanently?`)) {
+  const confirmed = await confirmAction(`Delete "${selectedTitle}" permanently?`, {
+    confirmLabel: "delete"
+  });
+  if (!confirmed) {
     return;
   }
   await apiFetch(`/api/notes/${encodeURIComponent(selectedId)}`, { method: "DELETE" });
@@ -1361,6 +1513,9 @@ async function toggleArchivedFilter() {
 
 function onGlobalKeydown(event) {
   if (event.defaultPrevented || event.metaKey || event.altKey) {
+    return;
+  }
+  if (dialogOpen) {
     return;
   }
 

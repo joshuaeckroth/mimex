@@ -185,6 +185,66 @@ button[disabled] {
   z-index: 25;
 }
 
+body.dialog-open {
+  overflow: hidden;
+}
+
+.prompt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: var(--overlay);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.prompt-dialog {
+  width: min(34rem, 100%);
+  border: 2px solid var(--line);
+  background: var(--panel);
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.prompt-title {
+  margin: 0;
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.prompt-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.prompt-input {
+  width: 100%;
+  border: 2px solid var(--line-soft);
+  background: var(--editor-bg);
+  color: var(--ink);
+  font: inherit;
+  padding: 0.5rem 0.55rem;
+}
+
+.prompt-input:focus {
+  outline: none;
+  border-color: var(--line);
+}
+
+.prompt-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.prompt-confirm {
+  background: var(--active);
+}
+
 .panes {
   min-height: 0;
   height: auto;
