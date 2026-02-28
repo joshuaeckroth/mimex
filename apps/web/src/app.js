@@ -20,6 +20,7 @@ const els = {
   toggleThemeBtn: document.querySelector("#toggleThemeBtn"),
   toggleWideBtn: document.querySelector("#toggleWideBtn"),
   toggleNotesBtn: document.querySelector("#toggleNotesBtn"),
+  openHelpBtn: document.querySelector("#openHelpBtn"),
   openSettingsBtn: document.querySelector("#openSettingsBtn"),
   closeSidebarBtn: document.querySelector("#closeSidebarBtn"),
   sidebarBackdrop: document.querySelector("#sidebarBackdrop")
@@ -74,6 +75,33 @@ const desktopBridge =
 let dialogOpen = false;
 let gitActionInFlight = false;
 let autoSyncTimerId = null;
+
+const HELP_SHORTCUTS = [
+  { keys: "?", action: "Open help" },
+  { keys: ",", action: "Open settings" },
+  { keys: "/", action: "Focus search" },
+  { keys: "Tab", action: "Switch focus between notes and body" },
+  { keys: "Left / Right", action: "Focus notes / body pane" },
+  { keys: "j or Down", action: "Move down (notes) or scroll down (body)" },
+  { keys: "k or Up", action: "Move up (notes) or scroll up (body)" },
+  { keys: "PageDown / PageUp", action: "Page down / up in focused pane" },
+  { keys: "J / K", action: "Half-page down / up in focused pane" },
+  { keys: "Ctrl+d / Ctrl+u", action: "Half-page down / up in focused pane" },
+  { keys: "g / G", action: "Jump to top / bottom in focused pane" },
+  { keys: "[ / ]", action: "Select previous / next body" },
+  { keys: "e", action: "Edit selected body" },
+  { keys: "Ctrl/Cmd+s", action: "Save while editing a body" },
+  { keys: "n", action: "Create note" },
+  { keys: "b", action: "Add body" },
+  { keys: "f", action: "Follow link prompt" },
+  { keys: "d", action: "Delete selected body (body focus)" },
+  { keys: "a / r / D", action: "Archive / restore / delete selected note" },
+  { keys: "x", action: "Toggle archived filter" },
+  { keys: "s", action: "Refresh notes" },
+  { keys: "t", action: "Toggle theme" },
+  { keys: "w", action: "Toggle wide mode" },
+  { keys: "Escape", action: "Blur input, cancel edit, or close mobile notes drawer" }
+];
 
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
@@ -630,6 +658,93 @@ async function refreshGitContextForCurrentUser() {
       restartAutoSyncScheduler();
     }
   }
+}
+
+function openHelpMenu() {
+  if (dialogOpen) {
+    return;
+  }
+
+  dialogOpen = true;
+  document.body.classList.add("dialog-open");
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  const overlay = document.createElement("div");
+  overlay.className = "prompt-overlay";
+
+  const dialog = document.createElement("div");
+  dialog.className = "prompt-dialog help-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-label", "Keyboard Help");
+
+  const titleEl = document.createElement("h3");
+  titleEl.className = "prompt-title";
+  titleEl.textContent = "Keyboard Help";
+
+  const hintEl = document.createElement("p");
+  hintEl.className = "prompt-message";
+  hintEl.textContent = "Available keys and actions";
+
+  const list = document.createElement("div");
+  list.className = "help-list";
+  for (const item of HELP_SHORTCUTS) {
+    const row = document.createElement("div");
+    row.className = "help-row";
+
+    const key = document.createElement("kbd");
+    key.className = "help-key";
+    key.textContent = item.keys;
+
+    const action = document.createElement("span");
+    action.className = "help-action";
+    action.textContent = item.action;
+
+    row.append(key, action);
+    list.append(row);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "prompt-actions";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "prompt-confirm";
+  closeBtn.textContent = "close";
+  actions.append(closeBtn);
+
+  let closing = false;
+  const finish = () => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    dialogOpen = false;
+    document.body.classList.remove("dialog-open");
+    document.removeEventListener("keydown", onKeydown, true);
+    overlay.remove();
+    previousFocus?.focus();
+  };
+
+  const onKeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finish();
+    }
+  };
+
+  closeBtn.addEventListener("click", finish);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      finish();
+    }
+  });
+
+  dialog.append(titleEl, hintEl, list, actions);
+  overlay.append(dialog);
+  document.body.append(overlay);
+  document.addEventListener("keydown", onKeydown, true);
+  closeBtn.focus();
 }
 
 async function openSettingsMenu() {
@@ -2262,6 +2377,12 @@ function onGlobalKeydown(event) {
     return;
   }
 
+  if (event.key === "?") {
+    event.preventDefault();
+    openHelpMenu();
+    return;
+  }
+
   if (event.key === "Tab") {
     event.preventDefault();
     setFocusPane(state.focusPane === "notes" ? "body" : "notes");
@@ -2485,6 +2606,9 @@ els.userId.addEventListener("change", () => {
 els.toggleThemeBtn.addEventListener("click", toggleTheme);
 els.toggleWideBtn.addEventListener("click", toggleWideMode);
 els.toggleNotesBtn.addEventListener("click", toggleSidebar);
+els.openHelpBtn.addEventListener("click", () => {
+  openHelpMenu();
+});
 els.openSettingsBtn.addEventListener("click", () => {
   void openSettingsMenu();
 });

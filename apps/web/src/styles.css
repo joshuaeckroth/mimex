@@ -212,6 +212,40 @@ body.dialog-open {
   width: min(42rem, 100%);
 }
 
+.help-dialog {
+  width: min(40rem, 100%);
+  max-height: min(80dvh, 48rem);
+  overflow: auto;
+}
+
+.help-list {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.help-row {
+  display: grid;
+  grid-template-columns: minmax(8.5rem, 12.5rem) minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: start;
+  border: 1px solid var(--line-soft);
+  background: var(--editor-bg);
+  padding: 0.35rem 0.45rem;
+}
+
+.help-key {
+  font: inherit;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 0.2rem;
+  padding: 0.05rem 0.3rem;
+  white-space: nowrap;
+}
+
+.help-action {
+  font-size: 0.84rem;
+}
+
 .prompt-title {
   margin: 0;
   font-size: 0.95rem;
@@ -880,6 +914,11 @@ body[data-theme="dark"] .body-markdown .hljs-name {
 
   .note-title {
     font-size: 0.92rem;
+  }
+
+  .help-row {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
   }
 
   .body-editor {
