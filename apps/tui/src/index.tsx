@@ -8,7 +8,16 @@ import blessed from "neo-blessed";
 import { extractHardLinks, MimexCore } from "@mimex/core";
 import type { FollowLinkResult, HardLink, NoteMeta, NoteWithBodies, SoftLinkTarget } from "@mimex/shared-types";
 
-type InputMode = "none" | "search" | "create" | "body" | "bodyLabel" | "follow" | "confirmDelete" | "confirmDeleteBody";
+type InputMode =
+  | "none"
+  | "search"
+  | "create"
+  | "body"
+  | "bodyLabel"
+  | "bodyMove"
+  | "follow"
+  | "confirmDelete"
+  | "confirmDeleteBody";
 type FocusPane = "notes" | "bodies";
 type ThemeName = "dark" | "light";
 
@@ -121,7 +130,7 @@ const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
 const KEY_HINTS =
-  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, m rename body label, d delete body, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete note, x archived, t theme, s refresh, q quit";
+  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, m rename body label, v move body (Tab autocomplete), d delete body, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete note, x archived, t theme, s refresh, q quit";
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
@@ -214,6 +223,8 @@ function promptForMode(mode: InputMode): string {
       return "Body markdown";
     case "bodyLabel":
       return "Body label";
+    case "bodyMove":
+      return "Move body target note";
     case "follow":
       return "Follow target";
     case "confirmDelete":
@@ -1273,6 +1284,7 @@ function main(): void {
     const titleAndAlias = uniqueSorted(completionSource.flatMap((note) => [note.title, ...note.aliases]));
     const noteRefs = uniqueSorted(completionSource.flatMap((note) => [note.id, note.title, ...note.aliases]));
     const hardLinks = uniqueSorted(state.details.hardLinks.map((link) => link.raw));
+    const selectedId = getSelectedNote()?.id ?? null;
 
     if (mode === "search") {
       return [...hardLinks, ...titleAndAlias];
@@ -1280,6 +1292,11 @@ function main(): void {
 
     if (mode === "follow") {
       return [...hardLinks, ...noteRefs];
+    }
+
+    if (mode === "bodyMove") {
+      const moveTargets = completionSource.filter((note) => note.id !== selectedId);
+      return uniqueSorted(moveTargets.flatMap((note) => [note.id, note.title, ...note.aliases]));
     }
 
     if (mode === "create") {
@@ -1588,6 +1605,38 @@ function main(): void {
       detailsCache.delete(selected.id);
       await refresh(selected.id);
       setStatus(`Renamed body label to ${value}`);
+      renderUI();
+      return;
+    }
+
+    if (currentMode === "bodyMove") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      const activeBody = state.details.openedNote?.bodies[state.details.activeBodyIndex];
+      if (!activeBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      const moved = await core.moveBody({
+        noteRef: selected.id,
+        bodyId: activeBody.id,
+        targetNoteRef: value
+      });
+      detailsCache.delete(selected.id);
+      detailsCache.delete(moved.target.note.id);
+      await refresh(moved.sourceDeleted ? moved.target.note.id : selected.id);
+      setStatus(
+        moved.sourceDeleted
+          ? `Moved ${activeBody.label} to ${moved.target.note.title}; deleted empty source note`
+          : `Moved ${activeBody.label} to ${moved.target.note.title}`
+      );
       renderUI();
       return;
     }
@@ -2245,6 +2294,25 @@ function main(): void {
       }
 
       enterInputMode("bodyLabel", `Rename body label (${activeBody.label})`, activeBody.label);
+      return;
+    }
+
+    if (ch === "v") {
+      const selected = getSelectedNote();
+      if (!selected) {
+        setStatus("No note selected");
+        renderUI();
+        return;
+      }
+
+      const activeBody = state.details.openedNote?.bodies[state.details.activeBodyIndex];
+      if (!activeBody) {
+        setStatus("No note body selected");
+        renderUI();
+        return;
+      }
+
+      enterInputMode("bodyMove", `Move body ${activeBody.label} to note`);
       return;
     }
 

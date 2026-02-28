@@ -243,6 +243,130 @@ async function confirmAction(title, options = {}) {
   return result.confirmed;
 }
 
+async function promptForMoveTarget(currentNoteId) {
+  if (dialogOpen) {
+    return null;
+  }
+
+  let notes = [];
+  try {
+    const payload = await apiFetch("/api/notes");
+    notes = Array.isArray(payload) ? payload : [];
+  } catch {
+    notes = state.notes ?? [];
+  }
+
+  const candidates = notes.filter((note) => note && note.id !== currentNoteId && !note.archivedAt);
+  if (candidates.length === 0) {
+    setStatus("No target notes available", true);
+    return null;
+  }
+
+  dialogOpen = true;
+  document.body.classList.add("dialog-open");
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (confirmed) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      dialogOpen = false;
+      document.body.classList.remove("dialog-open");
+      document.removeEventListener("keydown", onKeydown, true);
+      overlay.remove();
+      previousFocus?.focus();
+      resolve(confirmed ? input.value.trim() || null : null);
+    };
+
+    const onKeydown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      }
+    };
+
+    const overlay = document.createElement("div");
+    overlay.className = "prompt-overlay";
+
+    const dialog = document.createElement("div");
+    dialog.className = "prompt-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "Move Body");
+
+    const title = document.createElement("h3");
+    title.className = "prompt-title";
+    title.textContent = "Move Body";
+
+    const hint = document.createElement("p");
+    hint.className = "prompt-message";
+    hint.textContent = "Choose a destination note (id, title, or alias).";
+
+    const datalistId = `move-targets-${Math.random().toString(36).slice(2, 9)}`;
+    const list = document.createElement("datalist");
+    list.id = datalistId;
+    const refs = new Set();
+    for (const note of candidates) {
+      refs.add(note.id);
+      refs.add(note.title);
+      for (const alias of note.aliases ?? []) {
+        if (alias) {
+          refs.add(alias);
+        }
+      }
+    }
+    for (const ref of refs) {
+      const option = document.createElement("option");
+      option.value = ref;
+      list.append(option);
+    }
+
+    const selectLabel = document.createElement("label");
+    selectLabel.className = "settings-field";
+    selectLabel.textContent = "Target note";
+
+    const input = document.createElement("input");
+    input.className = "prompt-input";
+    input.type = "text";
+    input.setAttribute("list", datalistId);
+    input.placeholder = "Start typing note title or id...";
+    input.value = candidates[0]?.id ?? "";
+    selectLabel.append(input);
+
+    const actions = document.createElement("div");
+    actions.className = "prompt-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "cancel";
+    const moveBtn = document.createElement("button");
+    moveBtn.type = "button";
+    moveBtn.className = "prompt-confirm";
+    moveBtn.textContent = "move";
+    actions.append(cancelBtn, moveBtn);
+
+    cancelBtn.addEventListener("click", () => finish(false));
+    moveBtn.addEventListener("click", () => finish(true));
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(false);
+      }
+    });
+
+    dialog.append(title, hint, selectLabel, actions, list);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    document.addEventListener("keydown", onKeydown, true);
+    input.focus();
+    input.select();
+  });
+}
+
 function readPersisted(key) {
   try {
     return window.localStorage.getItem(key);
@@ -1354,9 +1478,16 @@ function bindRenderedLinks(container, sourceNoteId) {
   }
 }
 
+function renderTaskCheckboxesAsUnicode(input) {
+  return String(input ?? "").replace(/^(\s*(?:[-*+]\s+)?)\[( |x|X)\](?=\s|$)/gm, (_match, prefix, marker) => {
+    const symbol = marker.toLowerCase() === "x" ? "\u2611" : "\u2610";
+    return `${prefix}${symbol}`;
+  });
+}
+
 function renderMarkdownInto(container, markdown, sourceNoteId) {
   container.innerHTML = "";
-  const body = markdown ?? "";
+  const body = renderTaskCheckboxesAsUnicode(markdown ?? "");
   if (!markdownRenderer) {
     container.textContent = body;
     return;
@@ -1555,6 +1686,9 @@ function renderNoteDetail() {
 
   const header = document.createElement("header");
   header.className = "detail-head";
+  const selectedBodyIndex =
+    note.bodies.length === 0 ? 0 : Math.max(0, Math.min(note.bodies.length - 1, state.activeBodyIndex));
+  state.activeBodyIndex = selectedBodyIndex;
 
   const headMain = document.createElement("div");
   headMain.className = "detail-head-main";
@@ -1572,6 +1706,26 @@ function renderNoteDetail() {
 
   const headActions = document.createElement("div");
   headActions.className = "detail-head-actions";
+
+  const prevBodyBtn = document.createElement("button");
+  prevBodyBtn.type = "button";
+  prevBodyBtn.className = "detail-head-btn";
+  prevBodyBtn.textContent = "<<";
+  prevBodyBtn.title = "Previous body";
+  prevBodyBtn.disabled = note.bodies.length <= 1 || selectedBodyIndex <= 0;
+  prevBodyBtn.addEventListener("click", () => {
+    selectBodyBy(-1);
+  });
+
+  const nextBodyBtn = document.createElement("button");
+  nextBodyBtn.type = "button";
+  nextBodyBtn.className = "detail-head-btn";
+  nextBodyBtn.textContent = ">>";
+  nextBodyBtn.title = "Next body";
+  nextBodyBtn.disabled = note.bodies.length <= 1 || selectedBodyIndex >= note.bodies.length - 1;
+  nextBodyBtn.addEventListener("click", () => {
+    selectBodyBy(1);
+  });
 
   const addBodyBtn = document.createElement("button");
   addBodyBtn.type = "button";
@@ -1597,7 +1751,7 @@ function renderNoteDetail() {
     void runCommand(deleteSelectedNote);
   });
 
-  headActions.append(addBodyBtn, archiveBtn, deleteBtn);
+  headActions.append(prevBodyBtn, nextBodyBtn, addBodyBtn, archiveBtn, deleteBtn);
   header.append(headMain, headActions);
   els.noteDetail.append(header);
 
@@ -1607,7 +1761,7 @@ function renderNoteDetail() {
   const detailMain = document.createElement("div");
   detailMain.className = "detail-main";
 
-  const softLinksPanel = state.wide ? createSoftLinksPanel() : null;
+  const softLinksPanel = createSoftLinksPanel();
 
   if (note.bodies.length === 0) {
     state.activeBodyIndex = 0;
@@ -1615,15 +1769,10 @@ function renderNoteDetail() {
     empty.className = "empty-msg";
     empty.textContent = "No bodies on this note.";
     detailMain.append(empty);
-    detailContent.append(detailMain);
-    if (softLinksPanel) {
-      detailContent.append(softLinksPanel);
-    }
+    detailContent.append(detailMain, softLinksPanel);
     els.noteDetail.append(detailContent);
     return;
   }
-
-  state.activeBodyIndex = Math.max(0, Math.min(note.bodies.length - 1, state.activeBodyIndex));
 
   for (const [bodyIndex, body] of note.bodies.entries()) {
     const card = document.createElement("section");
@@ -1711,10 +1860,7 @@ function renderNoteDetail() {
         event.stopPropagation();
 
         void (async () => {
-          const target = await promptForInput("Move body to note (title or id):", {
-            placeholder: "target note title or id",
-            confirmLabel: "move"
-          });
+          const target = await promptForMoveTarget(note.note.id);
           if (target === null) {
             return;
           }
@@ -1918,10 +2064,7 @@ function renderNoteDetail() {
     detailMain.append(card);
   }
 
-  detailContent.append(detailMain);
-  if (softLinksPanel) {
-    detailContent.append(softLinksPanel);
-  }
+  detailContent.append(detailMain, softLinksPanel);
   els.noteDetail.append(detailContent);
 }
 
