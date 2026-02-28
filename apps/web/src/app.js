@@ -88,7 +88,7 @@ const HELP_SHORTCUTS = [
   { keys: "J / K", action: "Half-page down / up in focused pane" },
   { keys: "Ctrl+d / Ctrl+u", action: "Half-page down / up in focused pane" },
   { keys: "g / G", action: "Jump to top / bottom in focused pane" },
-  { keys: "[ / ]", action: "Select previous / next body" },
+  { keys: "[ / ] / < / >", action: "Select previous / next body" },
   { keys: "e", action: "Edit selected body" },
   { keys: "Ctrl/Cmd+s", action: "Save while editing a body" },
   { keys: "n", action: "Create note" },
@@ -2292,6 +2292,16 @@ function scrollBodyBy(deltaPx) {
   window.scrollBy({ top: deltaPx, behavior: "auto" });
 }
 
+function scrollBodyCardToTop(bodyIndex) {
+  const card = els.noteDetail.querySelector(`.body-card[data-body-index="${bodyIndex}"]`);
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+
+  const targetTop = Math.max(0, window.scrollY + card.getBoundingClientRect().top - 8);
+  window.scrollTo({ top: targetTop, behavior: "auto" });
+}
+
 function selectBodyBy(delta) {
   const note = state.selectedNote;
   if (!note || note.bodies.length === 0) {
@@ -2305,10 +2315,18 @@ function selectBodyBy(delta) {
   state.focusPane = "body";
   applyUiState();
   renderNoteDetail();
-  const active = els.noteDetail.querySelector(".body-card.active");
-  if (active instanceof HTMLElement) {
-    active.scrollIntoView({ block: "nearest" });
-  }
+  scrollBodyCardToTop(next);
+  window.requestAnimationFrame(() => {
+    scrollBodyCardToTop(next);
+  });
+}
+
+function isPrevBodyShortcut(event) {
+  return event.key === "[" || event.key === "<" || (event.shiftKey && event.code === "Comma");
+}
+
+function isNextBodyShortcut(event) {
+  return event.key === "]" || event.key === ">" || (event.shiftKey && event.code === "Period");
 }
 
 function enterEditOnActiveBody() {
@@ -2637,13 +2655,13 @@ function onGlobalKeydown(event) {
     return;
   }
 
-  if (event.key === "[") {
+  if (isPrevBodyShortcut(event)) {
     event.preventDefault();
     selectBodyBy(-1);
     return;
   }
 
-  if (event.key === "]") {
+  if (isNextBodyShortcut(event)) {
     event.preventDefault();
     selectBodyBy(1);
     return;
