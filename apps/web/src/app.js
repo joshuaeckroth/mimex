@@ -243,6 +243,22 @@ async function confirmAction(title, options = {}) {
   return result.confirmed;
 }
 
+function dedupeCaseInsensitive(values) {
+  const seen = new Map();
+  for (const raw of values) {
+    const value = String(raw ?? "").trim();
+    if (!value) {
+      continue;
+    }
+
+    const folded = value.toLocaleLowerCase();
+    if (!seen.has(folded)) {
+      seen.set(folded, value);
+    }
+  }
+  return [...seen.values()];
+}
+
 async function promptForMoveTarget(currentNoteId) {
   if (dialogOpen) {
     return null;
@@ -311,16 +327,9 @@ async function promptForMoveTarget(currentNoteId) {
     const datalistId = `move-targets-${Math.random().toString(36).slice(2, 9)}`;
     const list = document.createElement("datalist");
     list.id = datalistId;
-    const refs = new Set();
-    for (const note of candidates) {
-      refs.add(note.id);
-      refs.add(note.title);
-      for (const alias of note.aliases ?? []) {
-        if (alias) {
-          refs.add(alias);
-        }
-      }
-    }
+    const refs = dedupeCaseInsensitive(
+      candidates.flatMap((note) => [note.id, note.title, ...(Array.isArray(note.aliases) ? note.aliases : [])])
+    );
     for (const ref of refs) {
       const option = document.createElement("option");
       option.value = ref;

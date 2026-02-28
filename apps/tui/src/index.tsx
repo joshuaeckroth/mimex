@@ -338,9 +338,20 @@ export function parseEditedNoteContent(content: string): { title: string; markdo
 }
 
 export function uniqueSorted(values: string[]): string[] {
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, undefined, { sensitivity: "base" })
-  );
+  const seen = new Map<string, string>();
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) {
+      continue;
+    }
+
+    const folded = value.toLocaleLowerCase();
+    if (!seen.has(folded)) {
+      seen.set(folded, value);
+    }
+  }
+
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
 
 export function filterCompletionCandidates(values: string[], seed: string): string[] {
