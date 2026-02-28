@@ -9,9 +9,14 @@ const cacheDir = path.join(desktopRoot, ".cache", "electron-builder");
 
 await mkdir(cacheDir, { recursive: true });
 
+const args = ["exec", "electron-builder", "--win", "nsis"];
+if (process.env.MIMEX_SKIP_EXE_EDIT === "1") {
+  args.push("--config.win.signAndEditExecutable=false");
+}
+
 const child = spawn(
   "pnpm",
-  ["exec", "electron-builder", "--win", "nsis", "--config.win.signAndEditExecutable=false"],
+  args,
   {
     cwd: desktopRoot,
     env: {

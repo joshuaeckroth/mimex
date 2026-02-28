@@ -9,14 +9,19 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const API_PORT = Number(process.env.MIMEX_DESKTOP_API_PORT ?? "8080");
 const WEB_PORT = Number(process.env.MIMEX_DESKTOP_WEB_PORT ?? "4173");
 const STARTUP_TIMEOUT_MS = 20_000;
+const APP_USER_MODEL_ID = "dev.mimex.desktop";
 
 app.disableHardwareAcceleration();
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 const here = __dirname;
 const runtimeRoot = app.isPackaged ? resolvePackagedRuntimeRoot(here) : findRepoRootSync(here);
 const apiEntry = path.join(runtimeRoot, "apps", "api", "dist", "server.js");
 const webEntry = path.join(runtimeRoot, "apps", "web", "scripts", "server.mjs");
 const webIndex = path.join(runtimeRoot, "apps", "web", "dist", "index.html");
+const desktopIconPath = resolveDesktopIconPath(here);
 
 let shuttingDown = false;
 let servicesReady = false;
@@ -388,11 +393,18 @@ function startupErrorHtml(message) {
 }
 
 function createMainWindow() {
+  if (desktopIconPath) {
+    log(`desktop icon path=${desktopIconPath}`);
+  } else {
+    log("desktop icon path unresolved");
+  }
+
   const window = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 960,
     minHeight: 640,
+    icon: desktopIconPath || undefined,
     autoHideMenuBar: true,
     show: true,
     backgroundColor: "#f5f7fa",
@@ -422,6 +434,19 @@ function createMainWindow() {
   window.show();
   window.focus();
   return window;
+}
+
+function resolveDesktopIconPath(currentDir) {
+  const candidates = [
+    path.join(currentDir, "..", "assets", "icon.ico"),
+    path.join(currentDir, "..", "assets", "icon-1024.png")
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 async function loadMainUi(window) {
