@@ -1707,26 +1707,6 @@ function renderNoteDetail() {
   const headActions = document.createElement("div");
   headActions.className = "detail-head-actions";
 
-  const prevBodyBtn = document.createElement("button");
-  prevBodyBtn.type = "button";
-  prevBodyBtn.className = "detail-head-btn";
-  prevBodyBtn.textContent = "<<";
-  prevBodyBtn.title = "Previous body";
-  prevBodyBtn.disabled = note.bodies.length <= 1 || selectedBodyIndex <= 0;
-  prevBodyBtn.addEventListener("click", () => {
-    selectBodyBy(-1);
-  });
-
-  const nextBodyBtn = document.createElement("button");
-  nextBodyBtn.type = "button";
-  nextBodyBtn.className = "detail-head-btn";
-  nextBodyBtn.textContent = ">>";
-  nextBodyBtn.title = "Next body";
-  nextBodyBtn.disabled = note.bodies.length <= 1 || selectedBodyIndex >= note.bodies.length - 1;
-  nextBodyBtn.addEventListener("click", () => {
-    selectBodyBy(1);
-  });
-
   const addBodyBtn = document.createElement("button");
   addBodyBtn.type = "button";
   addBodyBtn.className = "detail-head-btn";
@@ -1751,7 +1731,7 @@ function renderNoteDetail() {
     void runCommand(deleteSelectedNote);
   });
 
-  headActions.append(prevBodyBtn, nextBodyBtn, addBodyBtn, archiveBtn, deleteBtn);
+  headActions.append(addBodyBtn, archiveBtn, deleteBtn);
   header.append(headMain, headActions);
   els.noteDetail.append(header);
 
@@ -1794,6 +1774,32 @@ function renderNoteDetail() {
     if (!isEditing) {
       const labelActions = document.createElement("div");
       labelActions.className = "body-label-actions";
+
+      const prevBodyBtn = document.createElement("button");
+      prevBodyBtn.type = "button";
+      prevBodyBtn.className = "body-label-btn";
+      prevBodyBtn.textContent = "<<";
+      prevBodyBtn.title = "Previous body";
+      prevBodyBtn.disabled = isSaving || note.bodies.length <= 1 || bodyIndex <= 0;
+      prevBodyBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        state.activeBodyIndex = bodyIndex;
+        selectBodyBy(-1);
+      });
+
+      const nextBodyBtn = document.createElement("button");
+      nextBodyBtn.type = "button";
+      nextBodyBtn.className = "body-label-btn";
+      nextBodyBtn.textContent = ">>";
+      nextBodyBtn.title = "Next body";
+      nextBodyBtn.disabled = isSaving || note.bodies.length <= 1 || bodyIndex >= note.bodies.length - 1;
+      nextBodyBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        state.activeBodyIndex = bodyIndex;
+        selectBodyBy(1);
+      });
 
       const editBtn = document.createElement("button");
       editBtn.type = "button";
@@ -1921,7 +1927,7 @@ function renderNoteDetail() {
         })();
       });
 
-      labelActions.append(editBtn, renameLabelBtn, moveBodyBtn, deleteBodyBtn);
+      labelActions.append(prevBodyBtn, nextBodyBtn, editBtn, renameLabelBtn, moveBodyBtn, deleteBodyBtn);
       label.append(labelActions);
     }
 

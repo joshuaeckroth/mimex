@@ -353,6 +353,7 @@ body.dialog-open {
   display: grid;
   gap: 0.2rem;
   text-align: left;
+  text-transform: none;
   padding: 0.55rem 0.65rem;
 }
 
