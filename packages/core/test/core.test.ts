@@ -203,6 +203,26 @@ describe("MimexCore", () => {
     expect(updated.bodies[0]?.markdown).toBe("after edit");
   });
 
+  it("splits an edited body and inserts new bodies right after the edited body", async () => {
+    const core = await newCore();
+    const created = await core.createNote({ title: "Split Editable", markdown: "first body", label: "main" });
+    const withTail = await core.addBody({ noteRef: created.note.id, markdown: "tail body", label: "tail" });
+    const mainBodyId = withTail.note.bodies.find((body) => body.label === "main")?.id;
+    expect(mainBodyId).toBeTruthy();
+
+    const updated = await core.updateBody({
+      noteRef: created.note.id,
+      bodyId: mainBodyId ?? "",
+      markdown: "head\n--- # New Body Label \nsecond\n--- # Third Body\nthird"
+    });
+
+    expect(updated.bodies.map((body) => body.label)).toEqual(["main", "New Body Label", "Third Body", "tail"]);
+    expect(updated.bodies[0]?.markdown).toBe("head");
+    expect(updated.bodies[1]?.markdown).toBe("second");
+    expect(updated.bodies[2]?.markdown).toBe("third");
+    expect(updated.bodies[3]?.markdown).toBe("tail body");
+  });
+
   it("renames note titles and prevents duplicate titles", async () => {
     const core = await newCore();
     const first = await core.createNote({ title: "First Note", markdown: "body" });

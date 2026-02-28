@@ -67,6 +67,11 @@ interface SearchFieldMatch {
   matchedTerms: number;
 }
 
+interface BodySplitSegment {
+  label: string;
+  markdown: string;
+}
+
 interface NormalizedTextWithMap {
   text: string;
   map: number[];
@@ -288,14 +293,34 @@ export class MimexCore {
     if (!body) {
       throw new Error(`body not found: ${input.bodyId}`);
     }
+    const bodyIndex = note.bodies.findIndex((entry) => entry.id === input.bodyId);
+    if (bodyIndex < 0) {
+      throw new Error(`body not found: ${input.bodyId}`);
+    }
 
     const now = new Date().toISOString();
+    const split = parseBodySplitSyntax(input.markdown);
     body.updatedAt = now;
     note.updatedAt = now;
 
-    await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), input.markdown, "utf8");
+    await writeFile(path.join(this.bodiesDir(note.id), `${body.id}.md`), split.primaryMarkdown, "utf8");
+
+    if (split.segments.length > 0) {
+      const inserted: NoteBodyMeta[] = [];
+      for (const segment of split.segments) {
+        const newBody = this.newBodyMeta(this.validateBodyLabel(segment.label), now);
+        inserted.push(newBody);
+        await writeFile(path.join(this.bodiesDir(note.id), `${newBody.id}.md`), segment.markdown, "utf8");
+      }
+      note.bodies.splice(bodyIndex + 1, 0, ...inserted);
+    }
+
     await this.writeNoteMeta(note);
-    await this.autoCommitWorkspace(`note: update body ${note.title}`);
+    await this.autoCommitWorkspace(
+      split.segments.length > 0
+        ? `note: split body ${note.title} [${body.id}] +${split.segments.length}`
+        : `note: update body ${note.title}`
+    );
     this.cacheNoteMeta(note);
     void this.persistNotesCache();
 
@@ -1524,6 +1549,33 @@ function scoreSearchField(field: string, query: ParsedSearchQuery, weights: Sear
 function slugify(input: string): string {
   const value = normalizeTitle(input).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return value || randomUUID().slice(0, 8);
+}
+
+function parseBodySplitSyntax(markdown: string): { primaryMarkdown: string; segments: BodySplitSegment[] } {
+  const lines = markdown.split(/\r?\n/);
+  const primaryLines: string[] = [];
+  const segments: Array<{ label: string; lines: string[] }> = [];
+  let activeLines = primaryLines;
+
+  for (const line of lines) {
+    const match = line.match(/^\s*---\s*#\s+(.+?)\s*$/);
+    if (match) {
+      const label = (match[1] ?? "").trim();
+      if (label.length > 0) {
+        const next = { label, lines: [] as string[] };
+        segments.push(next);
+        activeLines = next.lines;
+        continue;
+      }
+    }
+
+    activeLines.push(line);
+  }
+
+  return {
+    primaryMarkdown: primaryLines.join("\n"),
+    segments: segments.map((segment) => ({ label: segment.label, markdown: segment.lines.join("\n") }))
+  };
 }
 
 function isArchived(note: NoteMeta): boolean {
