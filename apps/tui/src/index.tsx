@@ -129,8 +129,43 @@ const defaultWorkspace = process.env.MIMEX_WORKSPACE_PATH ?? path.resolve(proces
 const DEBUG = process.env.MIMEX_TUI_DEBUG === "1";
 const DEBUG_FILE = process.env.MIMEX_TUI_DEBUG_FILE ?? path.join(os.tmpdir(), "mimex-tui-debug.log");
 const THEME_ENV = process.env.MIMEX_TUI_THEME;
-const KEY_HINTS =
-  "Tab/Left/Right pane, j/k + g/G scroll, PgUp/PgDn + Ctrl+u/d page, [ ] body, w wide soft links, e edit, m rename body label, v move body (Tab autocomplete), d delete body, l less, click [[link]] follow, n new, b body, / search, f follow, a archive, r restore, D delete note, x archived, t theme, s refresh, q quit";
+const COMMON_KEY_HINTS = "j/k move, Tab pane, / search, n new, b body, e edit, [ ]/< > body, ? help, q quit";
+const HELP_POPUP_LINES = [
+  "Common",
+  "j/k or Up/Down: move notes (notes pane) or scroll bodies (bodies pane).",
+  "Tab/Left/Right: switch focused pane.",
+  "/ search, n new note, b add body, e edit active body, q quit.",
+  "",
+  "Navigation",
+  "g/G: top/bottom in focused pane.",
+  "PgUp/PgDn: page up/down in focused pane.",
+  "Ctrl+u/Ctrl+d: half-page up/down in focused pane.",
+  "[ or <: previous body.",
+  "] or >: next body.",
+  "",
+  "Note and body actions",
+  "f: follow link target.",
+  "m: rename active body label.",
+  "v: move active body to another note (Tab autocomplete).",
+  "d: delete active body.",
+  "D: delete selected note.",
+  "a: archive note, r: restore note, x: show/hide archived notes.",
+  "",
+  "Display and tools",
+  "w: toggle wide soft-links pane.",
+  "l: open active body in less.",
+  "t: toggle theme.",
+  "s: refresh notes.",
+  "",
+  "Mouse",
+  "Click a note to select it.",
+  "Click a [[hard link]] in body content to follow it.",
+  "Wheel over notes list scrolls note viewport.",
+  "",
+  "Help popup",
+  "Esc, q, or ?: close help.",
+  "j/k, Up/Down, PgUp/PgDn, g/G: scroll help."
+];
 const NOTES_RENDER_WINDOW_MULTIPLIER = 2;
 const BODY_RENDER_WINDOW_MULTIPLIER = 2;
 const EDIT_TITLE_PREFIX = "%% MIMEX_TITLE:";
@@ -719,6 +754,21 @@ function buildBodyRender(
   return { lines, bodyStarts, hardLinkHits };
 }
 
+function buildHelpPopupContent(width: number): string {
+  const safeWidth = Math.max(20, width);
+  const lines: string[] = [];
+  for (const line of HELP_POPUP_LINES) {
+    if (line.length === 0) {
+      lines.push("");
+      continue;
+    }
+
+    lines.push(...wrapToWidth(line, safeWidth));
+  }
+
+  return lines.join("\n");
+}
+
 function main(): void {
   const core = new MimexCore(defaultWorkspace);
   const detailsCache = new Map<string, ResolvedNoteDetails>();
@@ -765,6 +815,7 @@ function main(): void {
   let lastBodyViewport = 1;
   let lastWideSoftLinksVisible = false;
   let lastSoftLinksTextWidth = 0;
+  let helpVisible = false;
 
   const screen = blessed.screen({
     smartCSR: true,
@@ -868,11 +919,40 @@ function main(): void {
     }
   });
 
+  const helpBox = blessed.box({
+    top: 2,
+    left: 4,
+    width: 96,
+    height: 26,
+    border: "line",
+    label: " Help ",
+    tags: false,
+    hidden: true,
+    scrollable: true,
+    alwaysScroll: true,
+    mouse: true,
+    keys: false,
+    vi: false,
+    style: {
+      bg: THEMES[state.theme].bodyBg,
+      fg: THEMES[state.theme].bodyItemFg,
+      border: { fg: THEMES[state.theme].borderFocused }
+    },
+    scrollbar: {
+      ch: " "
+    },
+    padding: {
+      left: 1,
+      right: 1
+    }
+  });
+
   screen.append(header);
   screen.append(notesList);
   screen.append(bodyList);
   screen.append(softLinksBox);
   screen.append(footer);
+  screen.append(helpBox);
 
   function getTerminalRows(): number {
     const fromScreen = typeof screen.height === "number" ? screen.height : Number.parseInt(String(screen.height), 10);
@@ -1673,9 +1753,15 @@ function main(): void {
   }
 
   function modeLineForWidth(cols: number): string {
-    return state.mode === "none"
-      ? truncateForWidth(KEY_HINTS, cols)
-      : truncateForWidth(`${promptForMode(state.mode)}: ${state.inputValue}_  (Tab completion, Enter submit, Esc cancel)`, cols);
+    if (state.mode !== "none") {
+      return truncateForWidth(`${promptForMode(state.mode)}: ${state.inputValue}_  (Tab completion, Enter submit, Esc cancel)`, cols);
+    }
+
+    if (helpVisible) {
+      return truncateForWidth("Help open: Esc/q/? close, j/k + PgUp/PgDn + g/G scroll", cols);
+    }
+
+    return truncateForWidth(COMMON_KEY_HINTS, cols);
   }
 
   function setFooterContent(cols: number): void {
@@ -2025,6 +2111,24 @@ function main(): void {
     updateSoftLinksWideDisplay(wideSoftLinksVisible, softLinksTextWidth);
     setFooterContent(cols);
 
+    const helpWidth = Math.max(52, Math.min(cols - 4, 106));
+    const helpHeight = Math.max(14, Math.min(rows - 3, 28));
+    helpBox.top = Math.max(1, Math.floor((rows - helpHeight) / 2));
+    helpBox.left = Math.max(0, Math.floor((cols - helpWidth) / 2));
+    helpBox.width = helpWidth;
+    helpBox.height = helpHeight;
+    helpBox.style.bg = theme.bodyBg;
+    helpBox.style.fg = theme.bodyItemFg;
+    helpBox.style.border = { fg: theme.borderFocused };
+    helpBox.setLabel(" Help (? to close) ");
+    helpBox.setContent(buildHelpPopupContent(Math.max(20, helpWidth - 4)));
+    if (helpVisible) {
+      helpBox.show();
+      helpBox.setFront();
+    } else {
+      helpBox.hide();
+    }
+
     if (selected) {
       debugLog(
         `render selected=${selected.id} focus=${state.focusPane} mode=${state.mode} theme=${state.theme} bodyScroll=${state.bodyScrollOffset} lines=${bodyRender.lines.length}`
@@ -2096,6 +2200,12 @@ function main(): void {
     if (ch === "q") {
       screen.destroy();
       process.exit(0);
+      return;
+    }
+
+    if (ch === "?") {
+      helpVisible = true;
+      renderUI();
       return;
     }
 
@@ -2261,12 +2371,12 @@ function main(): void {
       return;
     }
 
-    if (ch === "[") {
+    if (ch === "[" || ch === "<") {
       jumpToBodyIndex(state.details.activeBodyIndex - 1);
       return;
     }
 
-    if (ch === "]") {
+    if (ch === "]" || ch === ">") {
       jumpToBodyIndex(state.details.activeBodyIndex + 1);
       return;
     }
@@ -2397,6 +2507,51 @@ function main(): void {
         setStatus(next ? "Showing archived notes" : "Hiding archived notes");
         renderUI();
       });
+    }
+  }
+
+  function handleHelpKey(ch: string, key: blessed.Widgets.Events.IKeyEventArg): void {
+    if (key.name === "escape" || ch === "q" || ch === "?") {
+      helpVisible = false;
+      renderUI();
+      return;
+    }
+
+    const pageStep = Math.max(1, (typeof helpBox.height === "number" ? helpBox.height : 20) - 5);
+
+    if (ch === "j" || key.name === "down") {
+      helpBox.scroll(1);
+      screen.render();
+      return;
+    }
+
+    if (ch === "k" || key.name === "up") {
+      helpBox.scroll(-1);
+      screen.render();
+      return;
+    }
+
+    if (key.name === "pagedown" || key.name === "next") {
+      helpBox.scroll(pageStep);
+      screen.render();
+      return;
+    }
+
+    if (key.name === "pageup" || key.name === "prior") {
+      helpBox.scroll(-pageStep);
+      screen.render();
+      return;
+    }
+
+    if (ch === "g") {
+      helpBox.setScroll(0);
+      screen.render();
+      return;
+    }
+
+    if (ch === "G") {
+      helpBox.setScroll(1_000_000);
+      screen.render();
     }
   }
 
@@ -2558,6 +2713,11 @@ function main(): void {
     if (key.ctrl && key.name === "c") {
       screen.destroy();
       process.exit(0);
+      return;
+    }
+
+    if (helpVisible) {
+      handleHelpKey(input, key);
       return;
     }
 
