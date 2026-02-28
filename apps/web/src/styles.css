@@ -10,6 +10,9 @@
   --active: #d9d9d9;
   --error: #4a1717;
   --overlay: rgba(20, 20, 20, 0.42);
+  --scroll-track: rgba(0, 0, 0, 0.05);
+  --scroll-thumb: rgba(0, 0, 0, 0.2);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.34);
   --font-ui: "IBM Plex Mono", "Iosevka", "Cascadia Mono", monospace;
   --font-note: "IBM Plex Sans", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
@@ -26,6 +29,9 @@ body[data-theme="dark"] {
   --active: #303030;
   --error: #ffb4b4;
   --overlay: rgba(0, 0, 0, 0.55);
+  --scroll-track: rgba(255, 255, 255, 0.06);
+  --scroll-thumb: rgba(255, 255, 255, 0.2);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.34);
 }
 
 * {
@@ -52,6 +58,57 @@ body {
   gap: 0.75rem;
   overflow: visible;
   position: relative;
+}
+
+html,
+body,
+.note-list,
+.help-dialog,
+.prompt-dialog,
+.body-editor {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+.note-list::-webkit-scrollbar,
+.help-dialog::-webkit-scrollbar,
+.prompt-dialog::-webkit-scrollbar,
+.body-editor::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track,
+.note-list::-webkit-scrollbar-track,
+.help-dialog::-webkit-scrollbar-track,
+.prompt-dialog::-webkit-scrollbar-track,
+.body-editor::-webkit-scrollbar-track {
+  background: var(--scroll-track);
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb,
+.note-list::-webkit-scrollbar-thumb,
+.help-dialog::-webkit-scrollbar-thumb,
+.prompt-dialog::-webkit-scrollbar-thumb,
+.body-editor::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background: var(--scroll-thumb);
+  background-clip: content-box;
+}
+
+html::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover,
+.note-list::-webkit-scrollbar-thumb:hover,
+.help-dialog::-webkit-scrollbar-thumb:hover,
+.prompt-dialog::-webkit-scrollbar-thumb:hover,
+.body-editor::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  background-clip: content-box;
 }
 
 .topbar,
