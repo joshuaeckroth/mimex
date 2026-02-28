@@ -1,4 +1,4 @@
-import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -143,11 +143,20 @@ describe("MimexCore", () => {
     expect(listed.map((note) => note.title)).toContain("Restore Me");
   });
 
-  it("deletes notes permanently and clears soft-link references", async () => {
-    const core = await newCore();
-    await core.createNote({ title: "Source", markdown: "[[Target]]" });
-    await core.createNote({ title: "Target", markdown: "body" });
+  it("deletes notes permanently and clears inbound/outbound soft-link references", async () => {
+    const { core, dir } = await newWorkspaceCore();
+    await core.createNote({ title: "Source", markdown: "src" });
+    await core.createNote({ title: "Target", markdown: "target" });
+    await core.createNote({ title: "Other", markdown: "other" });
+
     await core.followLink("Source", "Target");
+    await core.followLink("Target", "Source");
+    await core.followLink("Other", "Target");
+
+    const sourceBefore = await core.getTopSoftLinks("Source", 5);
+    expect(sourceBefore.map((entry) => entry.title)).toContain("Target");
+    const otherBefore = await core.getTopSoftLinks("Other", 5);
+    expect(otherBefore.map((entry) => entry.title)).toContain("Target");
 
     const deleted = await core.deleteNote("Target");
     expect(deleted.title).toBe("Target");
@@ -156,8 +165,27 @@ describe("MimexCore", () => {
     expect(listedAll.map((note) => note.title)).not.toContain("Target");
     await expect(core.getNote("Target")).rejects.toThrow(/note not found/i);
 
-    const top = await core.getTopSoftLinks("Source", 5);
-    expect(top).toHaveLength(0);
+    const sourceAfter = await core.getTopSoftLinks("Source", 5);
+    expect(sourceAfter.map((entry) => entry.title)).not.toContain("Target");
+    const otherAfter = await core.getTopSoftLinks("Other", 5);
+    expect(otherAfter.map((entry) => entry.title)).not.toContain("Target");
+
+    const softlinksPath = path.join(dir, ".mimex", "softlinks.json");
+    const store = JSON.parse(await readFile(softlinksPath, "utf8")) as {
+      edges?: Record<string, Record<string, number>>;
+      events?: Array<{ src: string; dst: string }>;
+    };
+    const edges = store.edges ?? {};
+    const events = store.events ?? [];
+
+    expect(Object.keys(edges)).not.toContain("target");
+    for (const targets of Object.values(edges)) {
+      expect(Object.keys(targets)).not.toContain("target");
+    }
+    for (const event of events) {
+      expect(event.src).not.toBe("target");
+      expect(event.dst).not.toBe("target");
+    }
   });
 
   it("updates existing body markdown", async () => {

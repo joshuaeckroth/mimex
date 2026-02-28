@@ -279,7 +279,7 @@ body.dialog-open {
   min-height: 0;
   height: auto;
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(16rem, 24rem) minmax(0, 1fr);
   gap: 0.75rem;
   position: relative;
   align-items: start;
@@ -288,7 +288,7 @@ body.dialog-open {
 .pane {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: minmax(0, 1fr);
   align-content: start;
 }
 
@@ -302,29 +302,12 @@ body.dialog-open {
 }
 
 .pane-list {
-  display: none;
-}
-
-.app-shell.wide .panes {
-  grid-template-columns: minmax(16rem, 24rem) minmax(0, 1fr);
-}
-
-.app-shell.wide .pane-list {
   display: grid;
-}
-
-.pane-title {
-  padding: 0.4rem 0.55rem;
-  border-bottom: 2px solid var(--line);
-  background: var(--panel-strong);
-  text-transform: uppercase;
-  font-size: 0.75rem;
-  letter-spacing: 0.09em;
 }
 
 .note-list {
   overflow-y: auto;
-  max-height: calc(100dvh - 16rem);
+  max-height: calc(100dvh - 13.5rem);
 }
 
 .note-row {
@@ -827,7 +810,7 @@ body[data-theme="dark"] .body-markdown .hljs-name {
     grid-template-columns: 1fr;
   }
 
-  .app-shell.wide .panes {
+  .panes {
     grid-template-columns: 1fr;
   }
 
@@ -880,10 +863,6 @@ body[data-theme="dark"] .body-markdown .hljs-name {
   .pane,
   .sidebar-close-btn {
     border-width: 1px;
-  }
-
-  .pane-title {
-    border-bottom-width: 1px;
   }
 
   .topbar {

@@ -1492,7 +1492,7 @@ function renderNoteDetail() {
   const detailMain = document.createElement("div");
   detailMain.className = "detail-main";
 
-  const softLinksPanel = createSoftLinksPanel();
+  const softLinksPanel = state.wide ? createSoftLinksPanel() : null;
 
   if (note.bodies.length === 0) {
     state.activeBodyIndex = 0;
@@ -1500,7 +1500,10 @@ function renderNoteDetail() {
     empty.className = "empty-msg";
     empty.textContent = "No bodies on this note.";
     detailMain.append(empty);
-    detailContent.append(detailMain, softLinksPanel);
+    detailContent.append(detailMain);
+    if (softLinksPanel) {
+      detailContent.append(softLinksPanel);
+    }
     els.noteDetail.append(detailContent);
     return;
   }
@@ -1800,7 +1803,10 @@ function renderNoteDetail() {
     detailMain.append(card);
   }
 
-  detailContent.append(detailMain, softLinksPanel);
+  detailContent.append(detailMain);
+  if (softLinksPanel) {
+    detailContent.append(softLinksPanel);
+  }
   els.noteDetail.append(detailContent);
 }
 
@@ -1939,6 +1945,7 @@ function toggleWideMode() {
   state.sidebarOpen = false;
   writePersisted(KEY_WIDE, String(state.wide));
   applyUiState();
+  renderNoteDetail();
 }
 
 function toggleSidebar() {
