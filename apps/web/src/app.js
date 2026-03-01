@@ -713,6 +713,7 @@ async function runGitAction(action, options = {}) {
   gitActionInFlight = true;
   try {
     const payload = await apiGitFetch(`/api/git/${action}`, { method: "POST" });
+    const completedAt = new Date().toISOString();
     if (payload?.status) {
       state.git = {
         ...state.git,
@@ -727,8 +728,14 @@ async function runGitAction(action, options = {}) {
       };
     }
 
-    if (!quietSuccess) {
-      setStatus(`Git ${action} succeeded`);
+    if (action === "sync") {
+      state.git.autoSyncLastSuccessAt = completedAt;
+      state.git.autoSyncLastError = null;
+      state.git.autoSyncLastErrorAt = null;
+    }
+
+    if (!quietSuccess || action === "sync") {
+      setStatus(`Git ${action} completed at ${formatDate(completedAt)}`);
     }
 
     return payload;
@@ -766,9 +773,6 @@ async function runAutoSyncCycle() {
       return;
     }
 
-    state.git.autoSyncLastSuccessAt = new Date().toISOString();
-    state.git.autoSyncLastError = null;
-    state.git.autoSyncLastErrorAt = null;
     scheduleAutoSync(state.git.autoSyncIntervalMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

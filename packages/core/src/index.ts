@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type {
   AddBodyInput,
   CreateNoteInput,
@@ -144,6 +144,12 @@ export interface GitWorkspaceStatus {
   hasAuth: boolean;
   currentBranch: string | null;
   dirty: boolean;
+}
+
+interface GitCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
 }
 
 export class MimexCore {
@@ -1108,8 +1114,8 @@ export class MimexCore {
   async getGitWorkspaceStatus(): Promise<GitWorkspaceStatus> {
     await this.init();
     const config = await this.readGitRemoteConfig();
-    const branchResult = this.runGitWithOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
-    const statusResult = this.runGitWithOutput(["status", "--porcelain"]);
+    const branchResult = await this.runGitWithOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+    const statusResult = await this.runGitWithOutput(["status", "--porcelain"]);
     const currentBranch = branchResult.exitCode === 0 ? branchResult.stdout.trim() || null : null;
     const dirty = statusResult.exitCode === 0 && statusResult.stdout.trim().length > 0;
     const hasAuth = config.authMode === "ssh" ? true : Boolean((config.token ?? "").trim() || config.tokenRef);
@@ -1130,23 +1136,23 @@ export class MimexCore {
     await this.init();
     const config = await this.readGitRemoteConfig();
     this.assertGitRemoteConfigured(config);
-    this.ensureOriginRemote(config.remoteUrl);
+    await this.ensureOriginRemote(config.remoteUrl);
 
     const authArgs = this.resolveGitAuthArgs(config, options.token ?? null);
     const gitEnv = this.gitCommandEnv();
-    this.runGitChecked([...authArgs, "fetch", "origin", config.branch], "git fetch failed", gitEnv);
-    this.runGitChecked([...authArgs, "pull", "--rebase", "origin", config.branch], "git pull failed", gitEnv);
+    await this.runGitChecked([...authArgs, "fetch", "origin", config.branch], "git fetch failed", gitEnv);
+    await this.runGitChecked([...authArgs, "pull", "--rebase", "origin", config.branch], "git pull failed", gitEnv);
   }
 
   async gitPush(options: GitCommandOptions = {}): Promise<void> {
     await this.init();
     const config = await this.readGitRemoteConfig();
     this.assertGitRemoteConfigured(config);
-    this.ensureOriginRemote(config.remoteUrl);
+    await this.ensureOriginRemote(config.remoteUrl);
 
     const authArgs = this.resolveGitAuthArgs(config, options.token ?? null);
     const gitEnv = this.gitCommandEnv();
-    this.runGitChecked([...authArgs, "push", "origin", `HEAD:${config.branch}`], "git push failed", gitEnv);
+    await this.runGitChecked([...authArgs, "push", "origin", `HEAD:${config.branch}`], "git push failed", gitEnv);
   }
 
   async gitSync(options: GitCommandOptions = {}): Promise<void> {
@@ -1196,16 +1202,16 @@ export class MimexCore {
     }
   }
 
-  private ensureOriginRemote(remoteUrl: string): void {
-    const currentRemote = this.runGitWithOutput(["remote", "get-url", "origin"]);
+  private async ensureOriginRemote(remoteUrl: string): Promise<void> {
+    const currentRemote = await this.runGitWithOutput(["remote", "get-url", "origin"]);
     if (currentRemote.exitCode !== 0) {
-      this.runGitChecked(["remote", "add", "origin", remoteUrl], "failed to add origin remote");
+      await this.runGitChecked(["remote", "add", "origin", remoteUrl], "failed to add origin remote");
       return;
     }
 
     const existingUrl = currentRemote.stdout.trim();
     if (existingUrl !== remoteUrl) {
-      this.runGitChecked(["remote", "set-url", "origin", remoteUrl], "failed to update origin remote");
+      await this.runGitChecked(["remote", "set-url", "origin", remoteUrl], "failed to update origin remote");
     }
   }
 
@@ -1234,8 +1240,8 @@ export class MimexCore {
     };
   }
 
-  private runGitChecked(args: string[], context: string, env?: NodeJS.ProcessEnv): string {
-    const result = this.runGitWithOutput(args, env);
+  private async runGitChecked(args: string[], context: string, env?: NodeJS.ProcessEnv): Promise<string> {
+    const result = await this.runGitWithOutput(args, env);
     if (result.exitCode !== 0) {
       const detail = result.stderr || result.stdout || "unknown git error";
       throw new Error(`${context}: ${detail}`);
@@ -1247,7 +1253,7 @@ export class MimexCore {
     if (await fileExists(path.join(this.workspacePath, ".git"))) {
       return;
     }
-    this.runGit(["init"]);
+    await this.runGit(["init"]);
   }
 
   private async autoCommitWorkspace(message: string): Promise<void> {
@@ -1255,12 +1261,12 @@ export class MimexCore {
       return;
     }
 
-    if (this.runGit(["add", "-A"]) !== 0) {
+    if ((await this.runGit(["add", "-A"])) !== 0) {
       return;
     }
-    const status = this.runGitWithOutput(["status", "--porcelain"]);
+    const status = await this.runGitWithOutput(["status", "--porcelain"]);
     if (status.exitCode === 0 && status.stdout.trim().length > 0) {
-      this.runGit([
+      await this.runGit([
         "-c",
         "user.name=Mimex",
         "-c",
@@ -1273,30 +1279,57 @@ export class MimexCore {
     }
   }
 
-  private runGit(args: string[], env?: NodeJS.ProcessEnv): number {
-    const result = spawnSync("git", args, {
-      cwd: this.workspacePath,
-      encoding: "utf8",
-      env: env ?? process.env
-    });
-    if (typeof result.status === "number") {
-      return result.status;
-    }
-    return -1;
+  private async runGit(args: string[], env?: NodeJS.ProcessEnv): Promise<number> {
+    const result = await this.runGitWithOutput(args, env);
+    return result.exitCode;
   }
 
-  private runGitWithOutput(args: string[], env?: NodeJS.ProcessEnv): { exitCode: number; stdout: string; stderr: string } {
-    const result = spawnSync("git", args, {
-      cwd: this.workspacePath,
-      encoding: "utf8",
-      env: env ?? process.env
+  private runGitWithOutput(args: string[], env?: NodeJS.ProcessEnv): Promise<GitCommandResult> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      let stdout = "";
+      let stderr = "";
+
+      const child = spawn("git", args, {
+        cwd: this.workspacePath,
+        env: env ?? process.env
+      });
+
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+
+      child.on("error", (error) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        const message = error instanceof Error ? error.message : String(error);
+        resolve({
+          exitCode: -1,
+          stdout,
+          stderr: `${stderr}${stderr ? "\n" : ""}${message}`.trim()
+        });
+      });
+
+      child.on("close", (code) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        resolve({
+          exitCode: typeof code === "number" ? code : -1,
+          stdout,
+          stderr: stderr.trim()
+        });
+      });
     });
-    const errorText = result.error?.message ?? "";
-    return {
-      exitCode: typeof result.status === "number" ? result.status : -1,
-      stdout: result.stdout ?? "",
-      stderr: `${result.stderr ?? ""}${errorText ? `\n${errorText}` : ""}`.trim()
-    };
   }
 }
 
