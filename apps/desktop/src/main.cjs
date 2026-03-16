@@ -4,7 +4,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const process = require("node:process");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, clipboard, ipcMain } = require("electron");
 
 const API_PORT = Number(process.env.MIMEX_DESKTOP_API_PORT ?? "8080");
 const WEB_PORT = Number(process.env.MIMEX_DESKTOP_WEB_PORT ?? "4173");
@@ -39,6 +39,7 @@ if (!gotSingleInstanceLock) {
 }
 
 const KEYCHAIN_SERVICE = "mimex/git";
+const CONTEXT_MENU_MAX_ITEMS = 16;
 let keytar = null;
 try {
   // Optional dependency in dev; required for packaged desktop token storage.
@@ -101,6 +102,152 @@ function registerKeychainIpc() {
     await keytar.deletePassword(KEYCHAIN_SERVICE, account);
     return { ok: true };
   });
+}
+
+function registerClipboardIpc() {
+  ipcMain.handle("mimex:clipboard:write-text", async (_event, value) => {
+    clipboard.writeText(String(value ?? ""));
+    return { ok: true };
+  });
+}
+
+function registerContextMenuIpc() {
+  ipcMain.handle("mimex:context-menu:show", async (event, payload) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) {
+      return { shown: false };
+    }
+
+    const normalized = normalizeContextMenuPayload(payload);
+    const template = buildContextMenuTemplate(event.sender, normalized);
+    if (template.length === 0) {
+      return { shown: false };
+    }
+
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({
+      window,
+      x: normalized.x,
+      y: normalized.y
+    });
+    return { shown: true };
+  });
+}
+
+function normalizeContextMenuPayload(payload) {
+  const x = Number(payload?.x);
+  const y = Number(payload?.y);
+
+  return {
+    x: Number.isFinite(x) ? Math.round(x) : undefined,
+    y: Number.isFinite(y) ? Math.round(y) : undefined,
+    editable: Boolean(payload?.editable),
+    canCut: Boolean(payload?.canCut),
+    canCopy: Boolean(payload?.canCopy),
+    canPaste: Boolean(payload?.canPaste),
+    allowSelectAll: payload?.allowSelectAll !== false,
+    customItems: Array.isArray(payload?.customItems) ? payload.customItems : [],
+    context: payload && typeof payload.context === "object" ? payload.context : null
+  };
+}
+
+function buildContextMenuTemplate(webContents, payload) {
+  const template = [];
+
+  if (payload.editable) {
+    template.push(
+      { role: "undo" },
+      { role: "redo" },
+      { type: "separator" },
+      { role: "cut", enabled: payload.canCut },
+      { role: "copy", enabled: payload.canCopy },
+      { role: "paste", enabled: payload.canPaste }
+    );
+
+    if (payload.allowSelectAll) {
+      template.push({ type: "separator" }, { role: "selectAll" });
+    }
+  } else {
+    if (payload.canCopy) {
+      template.push({ role: "copy", enabled: true });
+    }
+
+    if (payload.allowSelectAll) {
+      if (template.length > 0) {
+        template.push({ type: "separator" });
+      }
+      template.push({ role: "selectAll" });
+    }
+  }
+
+  const customItems = buildCustomContextMenuItems(webContents, payload.customItems, payload.context);
+  if (customItems.length > 0) {
+    if (template.length > 0) {
+      template.push({ type: "separator" });
+    }
+    template.push(...customItems);
+  }
+
+  return trimContextMenuSeparators(template);
+}
+
+function buildCustomContextMenuItems(webContents, items, context) {
+  return items
+    .slice(0, CONTEXT_MENU_MAX_ITEMS)
+    .map((item) => normalizeCustomContextMenuItem(item, webContents, context))
+    .filter(Boolean);
+}
+
+function normalizeCustomContextMenuItem(item, webContents, context) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  if (item.type === "separator") {
+    return { type: "separator" };
+  }
+
+  const id = String(item.id ?? "").trim();
+  const label = String(item.label ?? "").trim();
+  if (!id || !label) {
+    return null;
+  }
+
+  return {
+    id,
+    label,
+    enabled: item.enabled !== false,
+    click: () => {
+      webContents.send("mimex:context-menu:command", {
+        actionId: id,
+        context
+      });
+    }
+  };
+}
+
+function trimContextMenuSeparators(template) {
+  const compact = [];
+
+  for (const item of template) {
+    if (!item) {
+      continue;
+    }
+
+    const isSeparator = item.type === "separator";
+    const previousIsSeparator = compact.at(-1)?.type === "separator";
+    if (isSeparator && (compact.length === 0 || previousIsSeparator)) {
+      continue;
+    }
+
+    compact.push(item);
+  }
+
+  if (compact.at(-1)?.type === "separator") {
+    compact.pop();
+  }
+
+  return compact;
 }
 
 function asErrorMessage(value) {
@@ -525,6 +672,8 @@ process.on("unhandledRejection", (reason) => {
 async function boot() {
   await app.whenReady();
   registerKeychainIpc();
+  registerClipboardIpc();
+  registerContextMenuIpc();
   const logsDir = path.join(app.getPath("userData"), "logs");
   await fsp.mkdir(logsDir, { recursive: true });
   logFilePath = path.join(logsDir, "main.log");

@@ -392,6 +392,293 @@ function writePersisted(key, value) {
   }
 }
 
+function resolveNoteMeta(noteId) {
+  const normalized = String(noteId ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (state.selectedNote?.note?.id === normalized) {
+    return state.selectedNote.note;
+  }
+  const note = state.notes.find((entry) => entry.id === normalized);
+  if (note) {
+    return note;
+  }
+  const searchResult = state.searchResults.find((entry) => entry.noteId === normalized);
+  if (searchResult) {
+    return {
+      id: searchResult.noteId,
+      title: searchResult.title,
+      archivedAt: null
+    };
+  }
+  return null;
+}
+
+function resolveSelectedBody(noteId, bodyIndex) {
+  if (state.selectedNote?.note?.id !== noteId) {
+    return null;
+  }
+  const normalizedIndex = Number(bodyIndex);
+  if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0) {
+    return null;
+  }
+  return state.selectedNote.bodies[normalizedIndex] ?? null;
+}
+
+function buildNoteUrl(noteId) {
+  const encodedNoteId = encodeURIComponent(String(noteId ?? "").trim());
+  return `${window.location.origin}${window.location.pathname}${window.location.search}#note:${encodedNoteId}`;
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text ?? "");
+  if (!value) {
+    return;
+  }
+
+  if (desktopBridge?.clipboard?.writeText) {
+    await desktopBridge.clipboard.writeText(value);
+    return;
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.setAttribute("readonly", "true");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  document.body.append(fallback);
+  fallback.select();
+  document.execCommand("copy");
+  fallback.remove();
+}
+
+function selectedTextForTarget(target) {
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    const start = target.selectionStart ?? 0;
+    const end = target.selectionEnd ?? start;
+    const from = Math.min(start, end);
+    const to = Math.max(start, end);
+    return target.value.slice(from, to);
+  }
+
+  return window.getSelection()?.toString() ?? "";
+}
+
+function buildGlobalContextMenuItems() {
+  return [
+    { id: "mimex-global-new-note", label: "New note" },
+    { id: "mimex-global-refresh", label: "Refresh notes" }
+  ];
+}
+
+function buildNoteContextMenuItems(noteId) {
+  const note = resolveNoteMeta(noteId);
+  const archived = Boolean(note?.archivedAt);
+
+  return [
+    { id: "mimex-note-copy-id", label: "Copy note ID" },
+    { id: "mimex-note-copy-link", label: "Copy note link" },
+    { type: "separator" },
+    { id: "mimex-note-add-body", label: "Add body" },
+    { id: "mimex-note-toggle-archive", label: archived ? "Restore note" : "Archive note" },
+    { id: "mimex-note-delete", label: "Delete note" }
+  ];
+}
+
+function buildBodyContextMenuItems(noteId, bodyIndex) {
+  const body = resolveSelectedBody(noteId, bodyIndex);
+  if (!body) {
+    return [];
+  }
+
+  return [
+    { id: "mimex-body-edit", label: "Edit body" },
+    { id: "mimex-body-delete", label: "Delete body" }
+  ];
+}
+
+function buildDesktopContextMenuPayload(event) {
+  if (!desktopBridge?.contextMenu?.show) {
+    return null;
+  }
+
+  const target = event.target instanceof Element ? event.target : null;
+  const selectionText = selectedTextForTarget(target);
+  const editable = isEditableElement(target);
+  const noteRow = target?.closest(".note-row");
+  const softLinkRow = target?.closest(".soft-link-row");
+  const bodyCard = target?.closest(".body-card");
+  const notePane = target?.closest(".pane-list");
+  const noteDetailSurface = target?.closest(".note-detail");
+
+  let context = null;
+  let customItems = [];
+
+  if (bodyCard instanceof HTMLElement && state.selectedNote?.note?.id) {
+    const bodyIndex = Number(bodyCard.dataset.bodyIndex);
+    if (Number.isInteger(bodyIndex)) {
+      context = {
+        kind: "body",
+        noteId: state.selectedNote.note.id,
+        bodyIndex
+      };
+      customItems = buildBodyContextMenuItems(context.noteId, context.bodyIndex);
+    }
+  } else if (noteRow instanceof HTMLElement || softLinkRow instanceof HTMLElement) {
+    const noteId = String((noteRow ?? softLinkRow)?.dataset.noteId ?? "").trim();
+    if (noteId) {
+      context = {
+        kind: "note",
+        noteId
+      };
+      customItems = buildNoteContextMenuItems(noteId);
+    }
+  } else if (noteDetailSurface instanceof HTMLElement && state.selectedNote?.note?.id) {
+    context = {
+      kind: "note",
+      noteId: state.selectedNote.note.id
+    };
+    customItems = buildNoteContextMenuItems(context.noteId);
+  } else if (notePane instanceof HTMLElement) {
+    context = { kind: "app" };
+    customItems = buildGlobalContextMenuItems();
+  }
+
+  return {
+    x: Math.round(event.clientX),
+    y: Math.round(event.clientY),
+    editable,
+    canCut: editable && selectionText.length > 0,
+    canCopy: selectionText.length > 0,
+    canPaste: editable,
+    allowSelectAll: true,
+    customItems,
+    context
+  };
+}
+
+async function ensureNoteSelected(noteId) {
+  const normalized = String(noteId ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (state.selectedNote?.note?.id === normalized) {
+    return state.selectedNote;
+  }
+  await selectNote(normalized);
+  return state.selectedNote?.note?.id === normalized ? state.selectedNote : null;
+}
+
+async function focusBodyContext(noteId, bodyIndex) {
+  const note = await ensureNoteSelected(noteId);
+  const normalizedIndex = Number(bodyIndex);
+  if (!note || !Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= note.bodies.length) {
+    setStatus("No note body selected", true);
+    return null;
+  }
+
+  state.activeBodyIndex = normalizedIndex;
+  state.focusPane = "body";
+  applyUiState();
+  renderNoteDetail();
+  return note;
+}
+
+async function runDesktopContextMenuAction(payload) {
+  const actionId = String(payload?.actionId ?? "").trim();
+  const context = payload?.context ?? null;
+  const noteId = String(context?.noteId ?? "").trim();
+
+  if (!actionId) {
+    return;
+  }
+
+  if (actionId === "mimex-global-new-note") {
+    await createNoteFromPrompt();
+    return;
+  }
+
+  if (actionId === "mimex-global-refresh") {
+    await refreshList({ preserveSelection: true });
+    return;
+  }
+
+  if (actionId === "mimex-note-copy-id") {
+    await copyTextToClipboard(noteId);
+    setStatus(`Copied note id ${noteId}`);
+    return;
+  }
+
+  if (actionId === "mimex-note-copy-link") {
+    await copyTextToClipboard(buildNoteUrl(noteId));
+    setStatus(`Copied note link for ${noteId}`);
+    return;
+  }
+
+  if (actionId === "mimex-note-add-body") {
+    if (!(await ensureNoteSelected(noteId))) {
+      setStatus("No note selected", true);
+      return;
+    }
+    await addBodyFromPrompt();
+    return;
+  }
+
+  if (actionId === "mimex-note-toggle-archive") {
+    const note = await ensureNoteSelected(noteId);
+    if (!note) {
+      setStatus("No note selected", true);
+      return;
+    }
+    await (note.note.archivedAt ? restoreSelectedNote : archiveSelectedNote)();
+    return;
+  }
+
+  if (actionId === "mimex-note-delete") {
+    if (!(await ensureNoteSelected(noteId))) {
+      setStatus("No note selected", true);
+      return;
+    }
+    await deleteSelectedNote();
+    return;
+  }
+
+  if (actionId === "mimex-body-edit") {
+    const note = await focusBodyContext(noteId, context?.bodyIndex);
+    if (!note) {
+      return;
+    }
+    enterEditOnActiveBody(state.activeBodyIndex);
+    return;
+  }
+
+  if (actionId === "mimex-body-delete") {
+    if (!(await focusBodyContext(noteId, context?.bodyIndex))) {
+      return;
+    }
+    await deleteActiveBody();
+  }
+}
+
+function onDesktopContextMenu(event) {
+  const payload = buildDesktopContextMenuPayload(event);
+  if (!payload || !desktopBridge?.contextMenu?.show) {
+    return;
+  }
+
+  event.preventDefault();
+  void desktopBridge.contextMenu.show(payload).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(`Failed to open context menu: ${message}`, true);
+  });
+}
+
 function clampAutoSyncIntervalMinutes(value) {
   if (!Number.isFinite(value)) {
     return AUTO_SYNC_DEFAULT_INTERVAL_MINUTES;
@@ -2342,13 +2629,19 @@ function isNextBodyShortcut(event) {
   return event.key === "]" || event.key === ">" || (event.shiftKey && event.code === "Period");
 }
 
-function enterEditOnActiveBody() {
+function enterEditOnActiveBody(bodyIndex = state.activeBodyIndex) {
   const note = state.selectedNote;
   if (!note || note.bodies.length === 0) {
     setStatus("No note body selected");
     return;
   }
-  const body = note.bodies[state.activeBodyIndex];
+  const normalizedIndex = Number(bodyIndex);
+  if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= note.bodies.length) {
+    setStatus("No note body selected");
+    return;
+  }
+  state.activeBodyIndex = normalizedIndex;
+  const body = note.bodies[normalizedIndex];
   if (!body) {
     return;
   }
@@ -2802,6 +3095,14 @@ window.addEventListener("resize", () => {
   applyUiState();
 });
 window.addEventListener("keydown", onGlobalKeydown);
+window.addEventListener("contextmenu", onDesktopContextMenu);
+
+const removeDesktopContextMenuListener = desktopBridge?.contextMenu?.onCommand?.((payload) => {
+  void runCommand(() => runDesktopContextMenuAction(payload));
+});
+window.addEventListener("beforeunload", () => {
+  removeDesktopContextMenuListener?.();
+});
 
 initUiPrefs();
 const initialPreferredNoteId = applyInitialHashState();
