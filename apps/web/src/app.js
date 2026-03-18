@@ -32,7 +32,9 @@ const KEY_GIT_AUTO_SYNC_PREFIX = "mimex:web:auto-sync";
 const AUTO_SYNC_DEFAULT_INTERVAL_MINUTES = 5;
 const AUTO_SYNC_MIN_INTERVAL_MINUTES = 1;
 const AUTO_SYNC_MAX_INTERVAL_MINUTES = 60;
+const AUTO_SYNC_REMOTE_FETCH_INTERVAL_MS = 60 * 60_000;
 const AUTO_SYNC_RETRY_DELAY_MS = 30_000;
+const NEW_BODY_DRAFT_ID = "__new_body__";
 const MOBILE_MEDIA = window.matchMedia("(max-width: 900px)");
 const WIDE_DEFAULT_MEDIA = window.matchMedia("(min-width: 1100px)");
 
@@ -62,6 +64,8 @@ const state = {
     autoSyncEnabled: false,
     autoSyncIntervalMs: AUTO_SYNC_DEFAULT_INTERVAL_MINUTES * 60_000,
     autoSyncLastSuccessAt: null,
+    autoSyncLastFetchAt: null,
+    autoSyncLastHead: null,
     autoSyncLastError: null,
     autoSyncLastErrorAt: null
   }
@@ -392,6 +396,10 @@ function writePersisted(key, value) {
   }
 }
 
+function buildNewBodyDraftKey(noteId) {
+  return `${String(noteId ?? "").trim()}:${NEW_BODY_DRAFT_ID}`;
+}
+
 function resolveNoteMeta(noteId) {
   const normalized = String(noteId ?? "").trim();
   if (!normalized) {
@@ -697,6 +705,8 @@ function loadAutoSyncPrefsForCurrentUser() {
     autoSyncEnabled: false,
     autoSyncIntervalMs: AUTO_SYNC_DEFAULT_INTERVAL_MINUTES * 60_000,
     autoSyncLastSuccessAt: null,
+    autoSyncLastFetchAt: null,
+    autoSyncLastHead: null,
     autoSyncLastError: null,
     autoSyncLastErrorAt: null
   };
@@ -713,13 +723,23 @@ function loadAutoSyncPrefsForCurrentUser() {
     const parsed = JSON.parse(raw);
     const enabled = Boolean(parsed?.enabled);
     const intervalMinutes = clampAutoSyncIntervalMinutes(Number(parsed?.intervalMinutes));
+    const lastSuccessAt =
+      typeof parsed?.lastSuccessAt === "string" && parsed.lastSuccessAt.trim() ? parsed.lastSuccessAt.trim() : null;
+    const lastFetchAt = typeof parsed?.lastFetchAt === "string" && parsed.lastFetchAt.trim() ? parsed.lastFetchAt.trim() : null;
+    const lastHead = typeof parsed?.lastHead === "string" && parsed.lastHead.trim() ? parsed.lastHead.trim() : null;
+    const lastError =
+      typeof parsed?.lastError === "string" && parsed.lastError.trim().length > 0 ? parsed.lastError.trim() : null;
+    const lastErrorAt =
+      typeof parsed?.lastErrorAt === "string" && parsed.lastErrorAt.trim().length > 0 ? parsed.lastErrorAt.trim() : null;
     state.git = {
       ...state.git,
       autoSyncEnabled: enabled,
       autoSyncIntervalMs: intervalMinutes * 60_000,
-      autoSyncLastSuccessAt: null,
-      autoSyncLastError: null,
-      autoSyncLastErrorAt: null
+      autoSyncLastSuccessAt: lastSuccessAt,
+      autoSyncLastFetchAt: lastFetchAt,
+      autoSyncLastHead: lastHead,
+      autoSyncLastError: lastError,
+      autoSyncLastErrorAt: lastErrorAt
     };
   } catch {
     state.git = {
@@ -735,7 +755,12 @@ function saveAutoSyncPrefsForCurrentUser() {
     autoSyncStorageKey(),
     JSON.stringify({
       enabled: Boolean(state.git.autoSyncEnabled),
-      intervalMinutes
+      intervalMinutes,
+      lastSuccessAt: state.git.autoSyncLastSuccessAt,
+      lastFetchAt: state.git.autoSyncLastFetchAt,
+      lastHead: state.git.autoSyncLastHead,
+      lastError: state.git.autoSyncLastError,
+      lastErrorAt: state.git.autoSyncLastErrorAt
     })
   );
 }
@@ -773,11 +798,20 @@ function formatAutoSyncStatus() {
     return "Automatic sync is off.";
   }
 
-  const parts = [`Automatic sync runs every ${Math.round(state.git.autoSyncIntervalMs / 60_000)} minute(s).`];
+  const parts = [
+    `Automatic local sync checks run every ${Math.round(state.git.autoSyncIntervalMs / 60_000)} minute(s).`,
+    `Remote-only pull runs every ${Math.round(AUTO_SYNC_REMOTE_FETCH_INTERVAL_MS / 60_000)} minute(s).`
+  ];
   if (state.git.autoSyncLastSuccessAt) {
-    parts.push(`Last success: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
+    parts.push(`Last sync: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
   } else {
-    parts.push("Last success: never.");
+    parts.push("Last sync: never.");
+  }
+
+  if (state.git.autoSyncLastFetchAt) {
+    parts.push(`Last remote fetch: ${formatDate(state.git.autoSyncLastFetchAt)}.`);
+  } else {
+    parts.push("Last remote fetch: never.");
   }
 
   if (state.git.autoSyncLastError && state.git.autoSyncLastErrorAt) {
@@ -1001,6 +1035,8 @@ async function runGitAction(action, options = {}) {
   try {
     const payload = await apiGitFetch(`/api/git/${action}`, { method: "POST" });
     const completedAt = new Date().toISOString();
+    const statusHead =
+      typeof payload?.status?.head === "string" && payload.status.head.trim() ? payload.status.head.trim() : null;
     if (payload?.status) {
       state.git = {
         ...state.git,
@@ -1014,11 +1050,21 @@ async function runGitAction(action, options = {}) {
         })
       };
     }
+    if (statusHead) {
+      state.git.autoSyncLastHead = statusHead;
+    }
 
     if (action === "sync") {
       state.git.autoSyncLastSuccessAt = completedAt;
+      state.git.autoSyncLastFetchAt = completedAt;
       state.git.autoSyncLastError = null;
       state.git.autoSyncLastErrorAt = null;
+      saveAutoSyncPrefsForCurrentUser();
+    } else if (action === "pull") {
+      state.git.autoSyncLastFetchAt = completedAt;
+      state.git.autoSyncLastError = null;
+      state.git.autoSyncLastErrorAt = null;
+      saveAutoSyncPrefsForCurrentUser();
     }
 
     if (!quietSuccess || action === "sync") {
@@ -1029,6 +1075,38 @@ async function runGitAction(action, options = {}) {
   } finally {
     gitActionInFlight = false;
   }
+}
+
+function parseStatusTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasLocalOutboundChanges(status) {
+  const ahead = Number(status?.ahead);
+  if (Number.isFinite(ahead)) {
+    return ahead > 0 || status?.dirty === true;
+  }
+
+  if (status?.dirty === true) {
+    return true;
+  }
+
+  const head = typeof status?.head === "string" && status.head.trim() ? status.head.trim() : null;
+  if (!head) {
+    return false;
+  }
+
+  if (!state.git.autoSyncLastHead) {
+    state.git.autoSyncLastHead = head;
+    saveAutoSyncPrefsForCurrentUser();
+    return false;
+  }
+
+  return state.git.autoSyncLastHead !== head;
 }
 
 async function runAutoSyncCycle() {
@@ -1051,13 +1129,39 @@ async function runAutoSyncCycle() {
   }
 
   try {
-    const result = await runGitAction("sync", {
-      quietSuccess: true,
-      skipIfBusy: true
-    });
-    if (result?.skipped) {
-      scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
+    const status = await apiGitFetch("/api/git/status");
+    if (hasLocalOutboundChanges(status)) {
+      const result = await runGitAction("sync", {
+        quietSuccess: true,
+        skipIfBusy: true
+      });
+      if (result?.skipped) {
+        scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
+        return;
+      }
+      saveAutoSyncPrefsForCurrentUser();
+      scheduleAutoSync(state.git.autoSyncIntervalMs);
       return;
+    }
+
+    const nowMs = Date.now();
+    const lastFetchMs = parseStatusTimestamp(state.git.autoSyncLastFetchAt);
+    const fetchDue = nowMs - lastFetchMs >= AUTO_SYNC_REMOTE_FETCH_INTERVAL_MS;
+    if (fetchDue) {
+      const pullResult = await runGitAction("pull", {
+        quietSuccess: true,
+        skipIfBusy: true
+      });
+      if (pullResult?.skipped) {
+        scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
+        return;
+      }
+      const completedAt = new Date().toISOString();
+      state.git.autoSyncLastFetchAt = completedAt;
+      state.git.autoSyncLastError = null;
+      state.git.autoSyncLastErrorAt = null;
+      setStatus(`Auto fetch completed at ${formatDate(completedAt)}`);
+      saveAutoSyncPrefsForCurrentUser();
     }
 
     scheduleAutoSync(state.git.autoSyncIntervalMs);
@@ -1066,6 +1170,7 @@ async function runAutoSyncCycle() {
     state.git.autoSyncLastError = message;
     state.git.autoSyncLastErrorAt = new Date().toISOString();
     setStatus(`Auto sync failed: ${message}`, true);
+    saveAutoSyncPrefsForCurrentUser();
     scheduleAutoSync(AUTO_SYNC_RETRY_DELAY_MS);
   }
 }
@@ -1289,7 +1394,8 @@ async function openSettingsMenu() {
 
   const autoSyncHint = document.createElement("p");
   autoSyncHint.className = "prompt-message";
-  autoSyncHint.textContent = "Runs pull --rebase + push in the background. Conflicts may still require manual resolution.";
+  autoSyncHint.textContent =
+    "Runs sync only when local commits exist. Remote-only pull runs every 60 minutes. Conflicts may still require manual resolution.";
 
   const autoSyncStatus = document.createElement("p");
   autoSyncStatus.className = "prompt-message";
@@ -1310,11 +1416,19 @@ async function openSettingsMenu() {
       return;
     }
 
-    const parts = [`Automatic sync will run every ${previewInterval} minute(s) after save.`];
+    const parts = [
+      `Automatic local sync checks will run every ${previewInterval} minute(s).`,
+      "Remote-only pull will run every 60 minute(s)."
+    ];
     if (state.git.autoSyncLastSuccessAt) {
-      parts.push(`Last success: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
+      parts.push(`Last sync: ${formatDate(state.git.autoSyncLastSuccessAt)}.`);
     } else {
-      parts.push("Last success: never.");
+      parts.push("Last sync: never.");
+    }
+    if (state.git.autoSyncLastFetchAt) {
+      parts.push(`Last remote fetch: ${formatDate(state.git.autoSyncLastFetchAt)}.`);
+    } else {
+      parts.push("Last remote fetch: never.");
     }
     if (state.git.autoSyncLastError && state.git.autoSyncLastErrorAt) {
       parts.push(`Last error (${formatDate(state.git.autoSyncLastErrorAt)}): ${state.git.autoSyncLastError}`);
@@ -2042,8 +2156,11 @@ function renderNoteDetail() {
   detailMain.className = "detail-main";
 
   const softLinksPanel = createSoftLinksPanel();
+  const newBodyKey = buildNewBodyDraftKey(note.note.id);
+  const isAddingBody = state.editingBodyIds.has(newBodyKey);
+  const isSavingNewBody = state.savingBodyIds.has(newBodyKey);
 
-  if (note.bodies.length === 0) {
+  if (note.bodies.length === 0 && !isAddingBody) {
     state.activeBodyIndex = 0;
     const empty = document.createElement("div");
     empty.className = "empty-msg";
@@ -2370,6 +2487,130 @@ function renderNoteDetail() {
     detailMain.append(card);
   }
 
+  if (isAddingBody) {
+    const card = document.createElement("section");
+    card.className = "body-card active";
+
+    const label = document.createElement("div");
+    label.className = "body-label";
+
+    const labelText = document.createElement("span");
+    labelText.className = "body-label-text";
+    labelText.textContent = "new body";
+    label.append(labelText);
+
+    const wrap = document.createElement("div");
+    wrap.className = "body-editor-wrap";
+
+    if (!state.bodyDrafts.has(newBodyKey)) {
+      state.bodyDrafts.set(newBodyKey, "");
+    }
+
+    const editor = document.createElement("textarea");
+    editor.className = "body-editor";
+    editor.rows = 36;
+    editor.value = state.bodyDrafts.get(newBodyKey) ?? "";
+    editor.setAttribute("spellcheck", "false");
+    editor.disabled = isSavingNewBody;
+    editor.dataset.newBody = "true";
+
+    const actions = document.createElement("div");
+    actions.className = "body-actions";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.disabled = isSavingNewBody || !editor.value.trim();
+    saveBtn.textContent = isSavingNewBody ? "saving..." : "add";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "cancel";
+    cancelBtn.disabled = isSavingNewBody;
+
+    const saveState = document.createElement("span");
+    saveState.className = "body-state";
+    saveState.textContent = isSavingNewBody
+      ? "Adding body"
+      : editor.value.trim()
+        ? "Unsaved body draft"
+        : "Body markdown required";
+
+    async function persistNewBody() {
+      const draft = editor.value;
+      if (!draft.trim()) {
+        setStatus("Body markdown is required", true);
+        return;
+      }
+
+      let saved = false;
+      state.savingBodyIds.add(newBodyKey);
+      renderNoteDetail();
+      try {
+        const updated = await apiFetch(`/api/notes/${encodeURIComponent(note.note.id)}/bodies`, {
+          method: "POST",
+          body: JSON.stringify({ markdown: draft })
+        });
+        state.selectedNote = updated;
+        state.selectedNoteId = updated.note.id;
+        state.activeBodyIndex = Math.max(0, updated.bodies.length - 1);
+        updateCachedNoteMeta(updated.note);
+        renderNoteList();
+        state.editingBodyIds.delete(newBodyKey);
+        state.bodyDrafts.delete(newBodyKey);
+        setStatus("Added body");
+        saved = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`Failed to add body: ${message}`, true);
+      } finally {
+        state.savingBodyIds.delete(newBodyKey);
+        if (!saved) {
+          state.bodyDrafts.set(newBodyKey, draft);
+        }
+        renderNoteDetail();
+        if (!saved) {
+          window.requestAnimationFrame(() => {
+            const activeEditor = els.noteDetail.querySelector('.body-editor[data-new-body="true"]');
+            if (activeEditor instanceof HTMLTextAreaElement) {
+              activeEditor.focus();
+              activeEditor.selectionStart = activeEditor.value.length;
+              activeEditor.selectionEnd = activeEditor.value.length;
+            }
+          });
+        }
+      }
+    }
+
+    saveBtn.addEventListener("click", () => {
+      void persistNewBody();
+    });
+
+    cancelBtn.addEventListener("click", () => {
+      state.editingBodyIds.delete(newBodyKey);
+      state.bodyDrafts.delete(newBodyKey);
+      setStatus("Add body cancelled");
+      renderNoteDetail();
+    });
+
+    editor.addEventListener("input", () => {
+      state.bodyDrafts.set(newBodyKey, editor.value);
+      saveBtn.disabled = !editor.value.trim();
+      saveState.textContent = editor.value.trim() ? "Unsaved body draft" : "Body markdown required";
+    });
+
+    editor.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void persistNewBody();
+      }
+    });
+
+    wrap.append(editor, actions);
+    actions.append(saveBtn, cancelBtn, saveState);
+    card.append(label, wrap);
+    detailMain.append(card);
+  }
+
   detailContent.append(detailMain, softLinksPanel);
   els.noteDetail.append(detailContent);
 }
@@ -2679,30 +2920,39 @@ async function createNoteFromPrompt() {
   setStatus(`Created ${created.note.title}`);
 }
 
+function focusNewBodyEditor() {
+  window.requestAnimationFrame(() => {
+    const editor = els.noteDetail.querySelector('.body-editor[data-new-body="true"]');
+    if (editor instanceof HTMLTextAreaElement) {
+      editor.focus();
+      editor.selectionStart = editor.value.length;
+      editor.selectionEnd = editor.value.length;
+    }
+  });
+}
+
 async function addBodyFromPrompt() {
   const selectedId = state.selectedNote?.note.id ?? state.selectedNoteId;
   if (!selectedId) {
     setStatus("No note selected");
     return;
   }
-  const markdown = await promptForInput("Body markdown:", {
-    multiline: true,
-    confirmLabel: "add"
-  });
-  if (!markdown || !markdown.trim()) {
+
+  const newBodyKey = buildNewBodyDraftKey(selectedId);
+  if (state.editingBodyIds.size > 0 && !state.editingBodyIds.has(newBodyKey)) {
+    setStatus("Finish or cancel the current edit first", true);
     return;
   }
-  const updated = await apiFetch(`/api/notes/${encodeURIComponent(selectedId)}/bodies`, {
-    method: "POST",
-    body: JSON.stringify({ markdown })
-  });
-  state.selectedNote = updated;
-  state.selectedNoteId = updated.note.id;
-  state.activeBodyIndex = Math.max(0, updated.bodies.length - 1);
-  updateCachedNoteMeta(updated.note);
-  renderNoteList();
+
+  state.editingBodyIds.add(newBodyKey);
+  if (!state.bodyDrafts.has(newBodyKey)) {
+    state.bodyDrafts.set(newBodyKey, "");
+  }
+  state.focusPane = "body";
+  setStatus("Adding body");
+  applyUiState();
   renderNoteDetail();
-  setStatus("Added body");
+  focusNewBodyEditor();
 }
 
 async function followFromPrompt() {

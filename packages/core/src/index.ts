@@ -143,6 +143,10 @@ export interface GitWorkspaceStatus {
   tokenRef: string | null;
   hasAuth: boolean;
   currentBranch: string | null;
+  head: string | null;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
   dirty: boolean;
 }
 
@@ -1115,8 +1119,24 @@ export class MimexCore {
     await this.init();
     const config = await this.readGitRemoteConfig();
     const branchResult = await this.runGitWithOutput(["rev-parse", "--abbrev-ref", "HEAD"]);
+    const headResult = await this.runGitWithOutput(["rev-parse", "HEAD"]);
+    const upstreamResult = await this.runGitWithOutput(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
     const statusResult = await this.runGitWithOutput(["status", "--porcelain"]);
     const currentBranch = branchResult.exitCode === 0 ? branchResult.stdout.trim() || null : null;
+    const head = headResult.exitCode === 0 ? headResult.stdout.trim() || null : null;
+    const upstream = upstreamResult.exitCode === 0 ? upstreamResult.stdout.trim() || null : null;
+    let ahead: number | null = null;
+    let behind: number | null = null;
+    if (upstream) {
+      const divergence = await this.runGitWithOutput(["rev-list", "--left-right", "--count", `${upstream}...HEAD`]);
+      if (divergence.exitCode === 0) {
+        const [behindRaw, aheadRaw] = divergence.stdout.trim().split(/\s+/);
+        const parsedBehind = Number(behindRaw);
+        const parsedAhead = Number(aheadRaw);
+        behind = Number.isFinite(parsedBehind) ? parsedBehind : null;
+        ahead = Number.isFinite(parsedAhead) ? parsedAhead : null;
+      }
+    }
     const dirty = statusResult.exitCode === 0 && statusResult.stdout.trim().length > 0;
     const hasAuth = config.authMode === "ssh" ? true : Boolean((config.token ?? "").trim() || config.tokenRef);
 
@@ -1128,6 +1148,10 @@ export class MimexCore {
       tokenRef: config.tokenRef,
       hasAuth,
       currentBranch,
+      head,
+      upstream,
+      ahead,
+      behind,
       dirty
     };
   }
