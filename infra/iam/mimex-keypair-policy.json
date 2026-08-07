@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageMimexKeyPair",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DeleteKeyPair",
+        "ec2:ImportKeyPair"
+      ],
+      "Resource": "arn:aws:ec2:us-east-1:*:key-pair/mimex-*"
+    }
+  ]
+}

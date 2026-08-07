@@ -829,13 +829,12 @@ function updateMobileDrawerMetrics() {
   if (!isMobileViewport() || !els.appShell || !els.toggleNotesBtn) {
     return;
   }
-  const shellRect = els.appShell.getBoundingClientRect();
   const btnRect = els.toggleNotesBtn.getBoundingClientRect();
-  const drawerWidth = Math.min(window.innerWidth * 0.86, 384);
+  const drawerWidth = Math.min(window.innerWidth - 12, 384);
 
-  const top = Math.max(0, btnRect.bottom - shellRect.top + 6);
-  let left = btnRect.left - shellRect.left;
-  left = Math.max(0, Math.min(left, shellRect.width - drawerWidth));
+  const top = Math.max(0, btnRect.bottom + 6);
+  let left = btnRect.left;
+  left = Math.max(6, Math.min(left, window.innerWidth - drawerWidth - 6));
 
   els.appShell.style.setProperty("--mobile-drawer-top", `${Math.round(top)}px`);
   els.appShell.style.setProperty("--mobile-drawer-left", `${Math.round(left)}px`);
@@ -843,6 +842,7 @@ function updateMobileDrawerMetrics() {
 
 function applyUiState() {
   document.body.dataset.theme = state.theme;
+  document.body.classList.toggle("sidebar-open", state.sidebarOpen);
 
   els.appShell.classList.toggle("wide", state.wide);
   els.appShell.classList.toggle("sidebar-open", state.sidebarOpen);
@@ -936,6 +936,11 @@ async function apiFetch(path, options = {}) {
     ...options,
     headers
   });
+
+  if (res.status === 401) {
+    window.location.replace("/login.html");
+    throw new Error("Authentication required");
+  }
 
   const text = await res.text();
   let payload = null;

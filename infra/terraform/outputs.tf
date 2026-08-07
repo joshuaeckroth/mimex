@@ -18,12 +18,7 @@ output "ssh_user" {
   value       = "ec2-user"
 }
 
-output "api_ecr_repository_url" {
-  description = "ECR repository URL for API image"
-  value       = aws_ecr_repository.api.repository_url
-}
-
-output "web_ecr_repository_url" {
-  description = "ECR repository URL for web image"
-  value       = aws_ecr_repository.web.repository_url
+output "hosted_zone_name_servers" {
+  description = "Name servers to configure at the registrar when Terraform creates the hosted zone"
+  value       = var.create_hosted_zone ? aws_route53_zone.root[0].name_servers : []
 }

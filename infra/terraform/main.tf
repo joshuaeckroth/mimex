@@ -1,23 +1,40 @@
 data "aws_route53_zone" "root" {
+  count        = var.create_hosted_zone ? 0 : 1
   name         = var.hosted_zone_name
   private_zone = false
 }
 
+resource "aws_route53_zone" "root" {
+  count = var.create_hosted_zone ? 1 : 0
+  name  = var.hosted_zone_name
+
+  tags = local.common_tags
+}
+
 data "aws_vpc" "default" {
+  count   = var.vpc_id == "" ? 1 : 0
   default = true
 }
 
-data "aws_subnets" "default" {
+locals {
+  vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.default[0].id
+}
+
+data "aws_subnets" "selected" {
+  count = var.subnet_id == "" ? 1 : 0
+
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+    values = [local.vpc_id]
   }
 }
 
 locals {
   name              = "${var.project_name}-${var.environment}"
   zone_name         = trimsuffix(var.hosted_zone_name, ".")
+  hosted_zone_id    = var.create_hosted_zone ? aws_route53_zone.root[0].zone_id : data.aws_route53_zone.root[0].zone_id
   ami_ssm_parameter = var.instance_arch == "arm64" ? "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64" : "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+  subnet_id         = var.subnet_id != "" ? var.subnet_id : sort(data.aws_subnets.selected[0].ids)[0]
   common_tags = merge({
     Project     = var.project_name
     Environment = var.environment
@@ -32,7 +49,7 @@ data "aws_ssm_parameter" "al2023_ami" {
 resource "aws_security_group" "app" {
   name        = "${local.name}-app-sg"
   description = "Security group for Mimex single-host deployment"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = local.vpc_id
 
   ingress {
     from_port   = 80
@@ -93,11 +110,6 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy_attachment" "ecr_read" {
-  role       = aws_iam_role.ec2.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
 resource "aws_iam_instance_profile" "ec2" {
   name = "${local.name}-ec2-profile"
   role = aws_iam_role.ec2.name
@@ -105,36 +117,15 @@ resource "aws_iam_instance_profile" "ec2" {
   tags = local.common_tags
 }
 
-resource "aws_ecr_repository" "api" {
-  name                 = "${local.name}-api"
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_ecr_repository" "web" {
-  name                 = "${local.name}-web"
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = local.common_tags
-}
-
 resource "aws_instance" "app" {
   ami                         = data.aws_ssm_parameter.al2023_ami.value
   instance_type               = var.instance_type
-  subnet_id                   = data.aws_subnets.default.ids[0]
+  subnet_id                   = local.subnet_id
   vpc_security_group_ids      = [aws_security_group.app.id]
   key_name                    = var.ssh_key_name != "" ? var.ssh_key_name : null
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   associate_public_ip_address = true
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_type = "gp3"
@@ -152,7 +143,7 @@ resource "aws_instance" "app" {
               set -euxo pipefail
 
               dnf update -y
-              dnf install -y docker curl
+              dnf install -y docker
 
               systemctl enable --now docker
               usermod -aG docker ec2-user || true
@@ -171,11 +162,11 @@ resource "aws_instance" "app" {
                 else
                   COMPOSE_ARCH="$ARCH"
                 fi
-                curl -fsSL "https://github.com/docker/compose/releases/download/v2.27.1/docker-compose-linux-$${COMPOSE_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-compose
+                curl -fsSL "https://github.com/docker/compose/releases/download/${var.docker_compose_version}/docker-compose-linux-$${COMPOSE_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-compose
                 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
               fi
 
-              mkdir -p /opt/mimex/certs /opt/mimex/data/postgres /opt/mimex/data/workspaces
+              mkdir -p /opt/mimex/data/workspaces
 
               cat > /etc/systemd/system/mimex-compose.service <<'UNIT'
               [Unit]
@@ -219,7 +210,7 @@ resource "aws_eip_association" "app" {
 }
 
 resource "aws_route53_record" "root_a" {
-  zone_id         = data.aws_route53_zone.root.zone_id
+  zone_id         = local.hosted_zone_id
   name            = local.zone_name
   type            = "A"
   ttl             = 300

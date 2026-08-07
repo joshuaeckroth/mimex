@@ -912,12 +912,13 @@ body[data-theme="dark"] .body-markdown .hljs-name {
 
   .pane-list {
     display: grid;
-    position: absolute;
+    position: fixed;
     top: var(--mobile-drawer-top, 3.2rem);
     left: var(--mobile-drawer-left, 0.55rem);
     bottom: auto;
-    width: min(86vw, 24rem);
-    height: min(72dvh, calc(100dvh - var(--mobile-drawer-top, 3.2rem) - 0.8rem));
+    width: min(calc(100vw - 0.75rem), 24rem);
+    height: calc(100dvh - var(--mobile-drawer-top, 3.2rem) - max(0.5rem, env(safe-area-inset-bottom)));
+    padding-top: 2.8rem;
     z-index: 30;
     transform: translateX(-105%);
     transition: transform 130ms linear;
@@ -933,9 +934,9 @@ body[data-theme="dark"] .body-markdown .hljs-name {
 
   .sidebar-close-btn {
     display: none;
-    position: absolute;
+    position: fixed;
     top: calc(var(--mobile-drawer-top, 3.2rem) + 0.45rem);
-    right: 0.95rem;
+    left: calc(var(--mobile-drawer-left, 0.55rem) + 0.45rem);
     z-index: 35;
   }
 
@@ -949,6 +950,22 @@ body[data-theme="dark"] .body-markdown .hljs-name {
 }
 
 @media (max-width: 520px) {
+  html,
+  body {
+    font-size: 16px;
+  }
+
+  body.sidebar-open {
+    overflow: hidden;
+  }
+
+  .app-shell {
+    min-height: 100dvh;
+    padding: max(0.35rem, env(safe-area-inset-top)) max(0.35rem, env(safe-area-inset-right))
+      max(0.5rem, env(safe-area-inset-bottom)) max(0.35rem, env(safe-area-inset-left));
+    gap: 0.35rem;
+  }
+
   .topbar,
   .controls,
   .status-row,
@@ -958,16 +975,158 @@ body[data-theme="dark"] .body-markdown .hljs-name {
   }
 
   .topbar {
-    flex-direction: column;
-    align-items: flex-start;
+    padding: 0.35rem 0.4rem;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .topbar-main {
+    flex: 0 0 auto;
+  }
+
+  .topbar h1 {
+    font-size: 0.9rem;
+  }
+
+  .topbar p {
+    display: none;
   }
 
   .topbar-actions {
-    width: 100%;
+    width: auto;
+    margin-left: auto;
+    display: grid;
+    grid-template-columns: repeat(4, auto);
+    gap: 0.22rem;
+    flex-wrap: nowrap;
   }
 
   .topbar-btn {
-    flex: 1 1 auto;
+    min-height: 2.6rem;
+    padding: 0.35rem 0.42rem;
+    font-size: 0.73rem;
+  }
+
+  .controls {
+    grid-template-columns: minmax(5.4rem, 0.65fr) minmax(0, 1.35fr);
+    gap: 0.35rem 0.45rem;
+    padding: 0.4rem;
+  }
+
+  .controls label {
+    gap: 0.18rem;
+    font-size: 0.66rem;
+  }
+
+  .controls input[type="text"],
+  .controls input[type="search"] {
+    min-width: 0;
+    min-height: 2.45rem;
+    padding: 0.4rem 0.45rem;
+    font-size: 1rem;
+  }
+
+  .controls .checkbox {
+    min-height: 2.45rem;
+    font-size: 0.76rem;
+  }
+
+  .controls > button {
+    width: 100%;
+    min-height: 2.45rem;
+  }
+
+  .status-row {
+    min-height: 1.8rem;
+    padding: 0.3rem 0.45rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.72rem;
+  }
+
+  .prompt-overlay {
+    place-items: start center;
+    overflow-y: auto;
+    padding: max(0.5rem, env(safe-area-inset-top)) max(0.5rem, env(safe-area-inset-right))
+      max(0.5rem, env(safe-area-inset-bottom)) max(0.5rem, env(safe-area-inset-left));
+  }
+
+  .prompt-dialog {
+    max-height: calc(100dvh - max(1rem, calc(env(safe-area-inset-top) + env(safe-area-inset-bottom))));
+    overflow-y: auto;
+    padding: 0.65rem;
+    gap: 0.5rem;
+  }
+
+  .prompt-input {
+    font-size: 1rem;
+  }
+
+  .prompt-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .settings-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .prompt-actions button {
+    min-height: 2.6rem;
+  }
+
+  .note-detail {
+    padding: 0.45rem;
+    gap: 0.55rem;
+  }
+
+  .detail-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+  }
+
+  .detail-head-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.3rem;
+  }
+
+  .detail-head-btn {
+    min-height: 2.35rem;
+  }
+
+  .detail-content,
+  .detail-main {
+    gap: 0.55rem;
+  }
+
+  .body-label {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.35rem;
+  }
+
+  .body-label-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.25rem;
+  }
+
+  .body-label-btn {
+    min-height: 2.45rem;
+    padding: 0.25rem 0.12rem;
+    font-size: 0.62rem;
+  }
+
+  .body-markdown {
+    padding: 0.45rem;
+    font-size: 0.96rem;
+    line-height: 1.42;
   }
 
   .note-title {
@@ -980,7 +1139,8 @@ body[data-theme="dark"] .body-markdown .hljs-name {
   }
 
   .body-editor {
-    font-size: 0.82rem;
+    min-height: 50dvh;
+    font-size: 1rem;
   }
 
   .detail-head {

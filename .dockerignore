@@ -12,4 +12,6 @@ data
 infra/terraform/.terraform
 infra/terraform/*.tfstate
 infra/terraform/*.tfstate.*
+apps/desktop/release
+apps/desktop/runtime
 *.log

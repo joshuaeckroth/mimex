@@ -22,6 +22,24 @@ variable "hosted_zone_name" {
   default     = "mimex.dev"
 }
 
+variable "create_hosted_zone" {
+  description = "Create and manage the public Route53 hosted zone instead of looking up an existing zone"
+  type        = bool
+  default     = false
+}
+
+variable "vpc_id" {
+  description = "Existing VPC ID. When empty, use the region's default VPC."
+  type        = string
+  default     = ""
+}
+
+variable "subnet_id" {
+  description = "Existing subnet ID. When empty, use the first subnet in the selected VPC."
+  type        = string
+  default     = ""
+}
+
 variable "instance_type" {
   description = "EC2 instance type. t4g.small is cheapest if your images are arm64-compatible."
   type        = string
@@ -45,6 +63,12 @@ variable "root_volume_size_gb" {
   default     = 30
 }
 
+variable "docker_compose_version" {
+  description = "Docker Compose plugin version to install if the package manager plugin is unavailable"
+  type        = string
+  default     = "v5.0.1"
+}
+
 variable "ssh_key_name" {
   description = "Existing EC2 key pair name for SSH access"
   type        = string
@@ -54,7 +78,7 @@ variable "ssh_key_name" {
 variable "ssh_cidr" {
   description = "CIDR allowed to SSH to the host. Set empty string to disable SSH ingress rule."
   type        = string
-  default     = "0.0.0.0/0"
+  default     = ""
 }
 
 variable "tags" {
